@@ -13,40 +13,53 @@ This project transforms the unofficial **ChatGPT-to-API** reverse-engineered pro
 ## 🏗️ System Architecture
 
 ```mermaid
-flowchart TD
-    subgraph Browser["Web Browser Client"]
-        UI[Glassmorphic Chat UI]
-        LS[(Browser localStorage)]
-        MD[Markdown & Code Parser]
-    end
+flowchart LR
+  %% Layout goals:
+  %% - left-to-right main flow
+  %% - minimal node types
+  %% - labels that match actual endpoints
 
-    subgraph Proxy["Express Proxy Backend - PORT env (default 3000)"]
-        Static[Static File Server]
-        Completions["/v1/chat/completions"]
-        Models["/v1/models"]
-        Sentinel[Sentinel Requirement Checker]
-        PoW["PoW Solver - SHA3-512"]
-        Auth[Token Auto-Refresher]
-    end
+  classDef client fill:#0b1220,stroke:#334155,color:#e2e8f0,stroke-width:1px
+  classDef proxy fill:#0b1f17,stroke:#14532d,color:#dcfce7,stroke-width:1px
+  classDef up fill:#1f1630,stroke:#5b21b6,color:#ede9fe,stroke-width:1px
+  classDef store fill:#0b1220,stroke:#475569,color:#e2e8f0,stroke-width:1px,stroke-dasharray: 4 3
+  classDef note fill:#111827,stroke:#374151,color:#e5e7eb,stroke-width:1px,stroke-dasharray: 3 3
 
-    subgraph Upstream["OpenAI ChatGPT Web Services"]
-        AuthAPI[Auth & Session API]
-        SentinelAPI[Sentinel Chat Requirements API]
-        ModelsAPI[Backend Models API]
-        ConvAPI[Conversation SSE Stream API]
-    end
+  subgraph B["Browser"]
+    UI["Web UI (public/)"]:::client
+    LS[("localStorage")]:::store
+  end
 
-    UI -->|"1. GET / (Assets)"| Static
-    UI -->|"2. POST /v1/chat/completions"| Completions
-    Completions -->|"3. Refresh Token"| Auth
-    Auth -->|Request| AuthAPI
-    Completions -->|"4. Fetch Requirements"| Sentinel
-    Sentinel -->|Request| SentinelAPI
-    Completions -->|"5. Compute SHA3-512 Nonce"| PoW
-    Completions -->|"6. POST with Proof Token"| ConvAPI
-    ConvAPI -->|"7. SSE Stream Chunks"| Completions
-    Completions -->|"8. Re-encoded SSE Stream"| UI
-    UI -->|Save History| LS
+  subgraph P["Proxy (Express)"]
+    STATIC["GET / (static assets)"]:::proxy
+    CHAT["POST /v1/chat/completions"]:::proxy
+    MODELS["GET /v1/models"]:::proxy
+    TOK["Access token refresh/cache"]:::proxy
+    POW["Sentinel PoW solver (SHA3-512)"]:::proxy
+  end
+
+  subgraph U["ChatGPT Web (Upstream)"]
+    AUTH["/api/auth/session"]:::up
+    REQ["/backend-api/sentinel/chat-requirements"]:::up
+    CONV["/backend-api/conversation (SSE)"]:::up
+  end
+
+  UI -->|"loads UI"| STATIC
+  UI -->|"lists models"| MODELS
+  UI -->|"chat request"| CHAT
+
+  CHAT -->|"needs access token"| TOK
+  TOK -->|"fetch/refresh"| AUTH
+
+  CHAT -->|"fetch requirements"| REQ
+  CHAT -->|"compute proof token"| POW
+  POW -->|"Openai-Sentinel-Proof-Token"| CHAT
+
+  CHAT -->|"dispatch + stream"| CONV
+  CONV -->|"SSE chunks"| CHAT
+  CHAT -->|"OpenAI-style SSE / JSON"| UI
+
+  UI <-.->|"persist history"| LS
 ```
 
 ### Request Flow (Step-by-Step)
