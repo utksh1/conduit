@@ -20,7 +20,7 @@ flowchart TD
         MD[Markdown & Code Parser]
     end
 
-    subgraph Proxy["Express Proxy Backend - port 3001"]
+    subgraph Proxy["Express Proxy Backend - PORT env (default 3000)"]
         Static[Static File Server]
         Completions["/v1/chat/completions"]
         Models["/v1/models"]
@@ -72,7 +72,7 @@ flowchart TD
 | **Sentinel PoW** | Fetches challenge from `/backend-api/sentinel/chat-requirements`, solves SHA3-512 |
 | **Model Routing** | Reads `model` from request body, passes it directly to upstream `backend-api/conversation` |
 | **SSE Re-encoding** | Converts ChatGPT's native SSE format to OpenAI API-compatible `chat.completion.chunk` format |
-| **Model List** | `/v1/models` returns the verified list of available model slugs |
+| **Model List** | `/v1/models` returns a hardcoded compatibility list (not a live probe of upstream availability) |
 
 ### 2. Frontend: `public/index.html`
 
@@ -106,81 +106,52 @@ flowchart TD
 
 ---
 
-## 📈 Verified Model Slug Mapping
+## 📈 Model IDs, Routing, And What We Can Actually Verify
 
-The following model slugs were discovered by querying the **actual OpenAI backend API** at `https://chatgpt.com/backend-api/models`:
+This proxy exposes an OpenAI-compatible surface, but it ultimately routes to ChatGPT Web (`chatgpt.com/backend-api/conversation`). That upstream API does not behave like the OpenAI API model contract:
 
-| UI Label | Backend Slug | Category | Version | Lane | Tagline |
-|:---|:---|:---|:---|:---|:---|
-| **Auto (5.5 Smart Routing)** | `gpt-5-5` | `gpt_5_auto` | 5.5 | auto | "Decides how long to think" |
-| **GPT-5.5 Instant** | `gpt-5-5-instant` | `gpt_5_5_instant` | 5.5 | instant | "Answers right away" |
-| **GPT-5.5 Thinking** | `gpt-5-5-thinking` | `gpt_5_5_reasoning` | 5.5 | thinking | "Thinks longer for better answers" |
-| **GPT-5.4 Thinking** | `gpt-5-4-thinking` | `gpt_5_4_reasoning` | 5.4 | thinking | "For complex questions" |
-| **GPT-5.3 Instant** | `gpt-5-3-instant` | `gpt_5_3_instant` | 5.3 | instant | "For everyday chats" |
-| **GPT-5.2 Instant** | `gpt-5-2-instant` | `gpt_5_instant` | 5.2 | instant | "For everyday chats" |
-| **GPT-5.2 Thinking** | `gpt-5-2-thinking` | `gpt_5_reasoning` | 5.2 | thinking | "For complex questions" |
-| **OpenAI o3** | `o3` | `o3` | o3 | — | "Legacy reasoning model" |
+1. The `GET /v1/models` list is hardcoded by this proxy for client compatibility.
+2. The upstream may silently ignore an unrecognized/unauthorized `model` value and route the request elsewhere.
+3. Asking the assistant "what model are you?" is not a reliable verification method.
 
-> **Important**: The backend uses **hyphens** in slugs (`gpt-5-5-instant`), **not dots** (`gpt-5.5-instant`). The previous UI options using dotted slugs were incorrect and have been corrected.
+### Models Advertised By This Proxy
 
-### Version Grouping (from backend API)
+As of the current `server.js`, `GET /v1/models` returns:
 
-| Version | Display | Slugs |
-|:---|:---|:---|
-| **5.5** | Latest • 5.5 | `gpt-5-5`, `gpt-5-5-instant`, `gpt-5-5-thinking` |
-| **5.4** | Legacy • 5.4 | `gpt-5-3-instant`, `gpt-5-4-thinking` |
-| **5.3** | Legacy • 5.3 | `gpt-5-3-instant` |
-| **5.2** | Legacy • 5.2 | `gpt-5-2-instant`, `gpt-5-2-thinking` |
-| **o3** | Legacy • o3 | `o3` |
+`auto`, `gpt-5.5-instant`, `gpt-5.5-thinking`, `gpt-5.5-pro`, `gpt-4o`, `o3`, `o3-pro`, `gpt-4.1`, `gpt-4.5`
+
+### Upstream Model Slug (Best-Effort)
+
+`server.js` now attempts to extract an upstream model slug from the ChatGPT SSE payload (fields vary over time, e.g. `model`, `model_slug`, or `message.metadata.model_slug`). If found, the proxy returns that value in the OpenAI-style response `model` field; otherwise it falls back to the requested model id.
 
 ---
 
-## 🧪 Model Identity Verification Test
+## 🧪 Model Routing Verification
 
-We ran a systematic test querying each model slug through our proxy server, asking each to self-identify.
+### What We Verify
 
-### Test Script
-```javascript
-// Sends "What is your model name/version?" to each slug via proxy
-const models = [
-  'gpt-5-5-instant', 'gpt-5-5-thinking', 'gpt-5-5', 'o3',
-  'gpt-5-4-thinking', 'gpt-5-3-instant', 'gpt-5-2-thinking',
-  'gpt-5-2-instant', 'auto', 'gpt-5.5-instant', 'gpt-5.5-thinking',
-  'gpt-5.5-pro', 'gpt-4o', 'o3-pro', 'gpt-4.1', 'gpt-4.5'
-];
+We can verify two things separately:
+
+1. Proxy echo: whether the proxy returns `response.model` matching the requested `model`.
+2. Upstream hint: whether the upstream SSE payload contains a model slug we can extract and surface.
+
+### Script: `scripts/verify-models.mjs`
+
+Run against a running proxy:
+
+```bash
+BASE_URL=http://localhost:3003/v1 node scripts/verify-models.mjs
 ```
 
-### Results (All 16 Models Tested)
+This script:
 
-| Model Slug Sent | HTTP Status | Self-Reported Identity |
-|:---|:---:|:---|
-| `gpt-5-5-instant` | ✅ 200 | GPT‑5 mini |
-| `gpt-5-5-thinking` | ✅ 200 | GPT‑5 mini |
-| `gpt-5-5` | ✅ 200 | GPT‑5 mini |
-| `o3` | ✅ 200 | GPT‑5 mini |
-| `gpt-5-4-thinking` | ✅ 200 | GPT‑5 mini |
-| `gpt-5-3-instant` | ✅ 200 | GPT‑5 mini |
-| `gpt-5-2-thinking` | ✅ 200 | GPT‑5 mini |
-| `gpt-5-2-instant` | ✅ 200 | GPT‑5 mini |
-| `auto` | ✅ 200 | GPT‑5 mini |
-| `gpt-5.5-instant` | ✅ 200 | GPT‑5 mini |
-| `gpt-5.5-thinking` | ✅ 200 | GPT‑5 mini |
-| `gpt-5.5-pro` | ✅ 200 | GPT-5-mini |
-| `gpt-4o` | ✅ 200 | GPT-5 mini |
-| `o3-pro` | ✅ 200 | *(empty response)* |
-| `gpt-4.1` | ✅ 200 | GPT-5 mini |
-| `gpt-4.5` | ✅ 200 | GPT-5 mini |
+1. Reads the model ids from `GET /v1/models`
+2. Calls `POST /v1/chat/completions` once per model
+3. Prints `requested_model`, `response.model`, and a best-effort `self_report_model` (for debugging only)
 
-### Key Findings
+### Key Finding
 
-1. **All models self-identify as "GPT‑5 mini"** regardless of the slug sent. This strongly suggests the backend **ignores unrecognized slugs** and falls back to a default model (likely `gpt-5-5` / auto).
-2. **`o3-pro` returned an empty response** — this model may require a Pro-tier subscription or may not be available via the reverse-engineered API surface.
-3. **Legacy/fictional slugs still work** (e.g., `gpt-4o`, `gpt-4.1`, `gpt-4.5`) — the backend silently falls back rather than returning an error.
-4. **The proxy PoW solver works reliably** — all 16 requests completed successfully with `200 OK` status.
-
-### Direct Upstream Test (Without Proxy)
-
-We also attempted to query the OpenAI backend directly (bypassing the proxy). All 11 direct requests failed with `403 Forbidden: "Unusual activity has been detected"`. This confirms the **proxy's Sentinel PoW solver is essential** for bypassing rate limiting.
+Assistant self-report is not reliable. If you need to know what you actually got, rely on the upstream model slug extraction (when it is present) rather than the assistant's answer.
 
 ---
 
