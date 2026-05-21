@@ -1,5 +1,10 @@
 const BASE_URL = process.env.BASE_URL || "http://localhost:3002/v1";
 
+// If output is piped (e.g. `| head`) and the pipe closes early, avoid crashing with EPIPE.
+process.stdout.on("error", (err) => {
+  if (err && err.code === "EPIPE") process.exit(0);
+});
+
 async function getModels() {
   const r = await fetch(`${BASE_URL}/models`);
   if (!r.ok) throw new Error(`GET /models failed: ${r.status}`);
