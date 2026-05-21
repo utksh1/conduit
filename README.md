@@ -8,6 +8,16 @@ This is a lightweight, zero-dependency Node.js Express server that acts as a loc
 2. **Translation**: It translates stateless `/v1/chat/completions` requests into the single-node conversation format expected by `chatgpt.com/backend-api/conversation`.
 3. **SSE Delta Extraction**: It converts ChatGPT's accumulated-stream chunks into standard OpenAI chunk deltas so text displays beautifully in real-time.
 
+## Sentinel Proof-of-Work (PoW)
+
+ChatGPT Web can require a “Sentinel” Proof-of-Work challenge before it will accept conversation requests.
+
+This proxy:
+
+1. Calls `POST https://chatgpt.com/backend-api/sentinel/chat-requirements` to fetch the PoW challenge.
+2. Solves the SHA3-512-based nonce puzzle locally.
+3. Sends the solution via the `Openai-Sentinel-Proof-Token` header when calling `POST https://chatgpt.com/backend-api/conversation`.
+
 ## Model Routing Reality Check
 
 This proxy exposes an OpenAI-compatible API surface, but it routes to ChatGPT Web (`chatgpt.com/backend-api/conversation`) under the hood. In practice:
