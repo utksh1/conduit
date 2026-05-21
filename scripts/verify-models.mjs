@@ -110,7 +110,7 @@ async function main() {
   }
 
   console.log(
-    "\nNote: `response.model` is set by this proxy to the requested model id. This verifies proxy echoing, not necessarily the upstream model selection."
+    "\nNote: this gateway may return either (a) the requested model id or (b) a best-effort upstream model slug extracted from ChatGPT's SSE payload when present. This is not a hard guarantee of upstream model selection."
   );
 }
 
@@ -118,4 +118,3 @@ main().catch((err) => {
   console.error(err?.stack || String(err));
   process.exit(1);
 });
-
