@@ -3,7 +3,8 @@ const cors = require("cors");
 const dotenv = require("dotenv");
 const { v4: uuidv4 } = require("uuid");
 const crypto = require("crypto");
-const path = require("path");
+const swaggerUi = require("swagger-ui-express");
+const swaggerJSDoc = require("swagger-jsdoc");
 // Load environment variables
 dotenv.config();
 
@@ -13,11 +14,119 @@ const PORT = process.env.PORT || 3000;
 // Enable CORS and JSON parsing
 app.use(cors());
 app.use(express.json());
-app.use(express.static(path.join(__dirname, "public")));
+
+// Backend-only service: no static frontend is served.
 
 // Token Cache
 let cachedAccessToken = null;
 let tokenExpiresAt = null;
+
+// OpenAPI / Swagger (kept small and hand-maintained for this gateway)
+const openApiSpec = swaggerJSDoc({
+  definition: {
+    openapi: "3.0.3",
+    info: {
+      title: "ChatGPT-to-API Gateway",
+      version: "1.0.0",
+      description:
+        "Unofficial OpenAI-compatible Chat Completions gateway backed by ChatGPT Web.",
+    },
+    servers: [{ url: "http://localhost:" + PORT, description: "Local" }],
+    components: {
+      securitySchemes: {
+        bearerAuth: { type: "http", scheme: "bearer" },
+      },
+      schemas: {
+        ChatCompletionMessage: {
+          type: "object",
+          required: ["role", "content"],
+          properties: {
+            role: {
+              type: "string",
+              enum: ["system", "user", "assistant", "tool"],
+            },
+            content: { type: ["string", "null"] },
+            name: { type: "string" },
+          },
+        },
+        ChatCompletionsRequest: {
+          type: "object",
+          required: ["messages"],
+          properties: {
+            model: {
+              type: "string",
+              description:
+                "Requested model id. Upstream routing may ignore this value.",
+            },
+            messages: {
+              type: "array",
+              items: { $ref: "#/components/schemas/ChatCompletionMessage" },
+            },
+            stream: { type: "boolean", default: false },
+          },
+          additionalProperties: true,
+        },
+      },
+    },
+    paths: {
+      "/ping": {
+        get: {
+          summary: "Health check",
+          responses: {
+            "200": {
+              description: "OK",
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    properties: {
+                      status: { type: "string" },
+                      time: { type: "string" },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      "/v1/models": {
+        get: {
+          summary: "List models (compatibility list)",
+          responses: {
+            "200": {
+              description: "List of model ids",
+            },
+          },
+        },
+      },
+      "/v1/chat/completions": {
+        post: {
+          summary: "Chat Completions (OpenAI-compatible)",
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/ChatCompletionsRequest" },
+              },
+            },
+          },
+          responses: {
+            "200": { description: "Chat completion response (JSON or SSE)" },
+            "400": { description: "Bad request" },
+            "401": { description: "Unauthorized" },
+            "500": { description: "Server error" },
+          },
+        },
+      },
+    },
+  },
+  apis: [],
+});
+
+app.get("/openapi.json", (req, res) => res.json(openApiSpec));
+app.use("/docs", swaggerUi.serve, swaggerUi.setup(openApiSpec));
 
 /**
  * Formats a stateless list of OpenAI-style messages into a single, cohesive
