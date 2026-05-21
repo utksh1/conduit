@@ -8,6 +8,16 @@ This is a lightweight, zero-dependency Node.js Express server that acts as a loc
 2. **Translation**: It translates stateless `/v1/chat/completions` requests into the single-node conversation format expected by `chatgpt.com/backend-api/conversation`.
 3. **SSE Delta Extraction**: It converts ChatGPT's accumulated-stream chunks into standard OpenAI chunk deltas so text displays beautifully in real-time.
 
+## Model Routing Reality Check
+
+This proxy exposes an OpenAI-compatible API surface, but it routes to ChatGPT Web (`chatgpt.com/backend-api/conversation`) under the hood. In practice:
+
+- `GET /v1/models` is a hardcoded compatibility list (for clients that expect the endpoint), not a live probe of which upstream models you can actually use.
+- The upstream endpoint may ignore an unrecognized/unauthorized `model` value and silently route you elsewhere.
+- Asking the assistant to “self-identify” its model is not reliable.
+
+For debugging, `server.js` attempts to extract an upstream model slug from the ChatGPT SSE payload (when present) and returns it as `response.model`. If no upstream model slug is present, the proxy falls back to echoing the requested model id.
+
 ---
 
 ## 🛠️ Step-by-Step Setup Guide
@@ -36,7 +46,7 @@ CHATGPT_SESSION_TOKEN=eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0...
 # (Optional) Add a local API key to protect your proxy server:
 PROXY_API_KEY=
 
-# Default model slug (options: auto, gpt-4o, gpt-4)
+# Default model id to send upstream when the client omits "model"
 DEFAULT_MODEL=auto
 ```
 
@@ -51,6 +61,12 @@ npm install
 
 # Start the proxy server
 npm start
+```
+
+If the configured port is already in use, override it:
+
+```bash
+PORT=3002 npm start
 ```
 
 You should see:
@@ -121,7 +137,7 @@ print()
 
 ---
 
-### 3. In Node.js (with official `@openai/api` library)
+### 3. In Node.js (with official `openai` library)
 ```javascript
 const { OpenAI } = require("openai");
 
@@ -169,6 +185,16 @@ For **Continue** config:
 ```
 
 ---
+
+## 🧪 Verify What The Proxy Reports As The Model
+
+With the server running, you can run:
+
+```bash
+BASE_URL=http://localhost:3000/v1 node scripts/verify-models.mjs
+```
+
+This script calls `GET /v1/models`, then sends one non-streaming request per model id and prints the requested model id plus the proxy's `response.model` (which may be an upstream slug if the upstream provided one).
 
 ## ⚠️ Essential Notices & Disclaimers
 - **Rate Limits & IP Blocks**: This proxy uses your browser's session, which means you are subject to the same rate limits and IP checks as the ChatGPT web application. If you make too many fast parallel requests, your IP may get flagged by Cloudflare or your account temporarily rate-limited.
