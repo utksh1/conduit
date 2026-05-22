@@ -1629,11 +1629,15 @@ app.post("/v1/responses", async (req, res) => {
   res.end();
 });
 
-// Start Server
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`====================================================`);
-  console.log(` ChatGPT Unofficial API Proxy Server is running!`);
-  console.log(` Listening on: http://localhost:${PORT}`);
-  console.log(` Base API endpoint: http://localhost:${PORT}/v1`);
-  console.log(`====================================================`);
-});
+// Start Server — skipped on Vercel (serverless), runs locally via `npm start`.
+if (require.main === module && !process.env.VERCEL) {
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`====================================================`);
+    console.log(` ChatGPT Unofficial API Proxy Server is running!`);
+    console.log(` Listening on: http://localhost:${PORT}`);
+    console.log(` Base API endpoint: http://localhost:${PORT}/v1`);
+    console.log(`====================================================`);
+  });
+}
+
+module.exports = app;
