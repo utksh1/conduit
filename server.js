@@ -5,6 +5,14 @@ const { v4: uuidv4 } = require("uuid");
 const crypto = require("crypto");
 const swaggerUi = require("swagger-ui-express");
 const swaggerJSDoc = require("swagger-jsdoc");
+const {
+  INTERNAL_BYPASS_TOKEN,
+  authenticateRequest,
+  installMeterHook,
+  reserve,
+  estimateTokens,
+  estimateMessageTokens,
+} = require("./lib/middleware");
 // Load environment variables
 dotenv.config();
 
@@ -952,10 +960,23 @@ app.get("/ping", (req, res) => {
 });
 
 // Models Endpoint (for OpenAI client compatibility)
-app.get("/v1/models", (req, res) => {
+app.get("/v1/models", async (req, res) => {
+  let models = SUPPORTED_MODELS;
+  try {
+    const auth = await authenticateRequest(req);
+    if (auth.authorized && auth.source === "db" && auth.key) {
+      if (auth.key.enforced_model) {
+        models = [auth.key.enforced_model];
+      } else if (Array.isArray(auth.key.allowed_models) && auth.key.allowed_models.length > 0) {
+        models = auth.key.allowed_models;
+      }
+    }
+  } catch (_) {
+    // Fall through with the full list if anything goes sideways.
+  }
   res.json({
     object: "list",
-    data: SUPPORTED_MODELS.map((id) => ({
+    data: models.map((id) => ({
       id,
       object: "model",
       created: 1715644800,
@@ -966,23 +987,23 @@ app.get("/v1/models", (req, res) => {
 
 // Chat Completions Endpoint
 app.post("/v1/chat/completions", async (req, res) => {
-  // 1. Authenticate Request
-  const authHeader = req.headers["authorization"] || "";
-  const clientToken = authHeader.replace("Bearer ", "").trim();
+  installMeterHook(req, res);
 
-  // If local API Key security is enabled, check it
-  if (process.env.PROXY_API_KEY) {
-    // If the clientToken matches the PROXY_API_KEY, that's fine.
-    // If it doesn't match AND it is not a direct ChatGPT Access Token, return 401.
-    if (clientToken !== process.env.PROXY_API_KEY && !clientToken.startsWith("ey")) {
-      return res.status(401).json({
-        error: {
-          message: "Invalid or missing Proxy API Key.",
-          type: "invalid_request_error",
-          code: "unauthorized"
-        }
-      });
-    }
+  // 1. Authenticate Request
+  const auth = await authenticateRequest(req);
+  if (!auth.authorized) {
+    req._meter.errorCode = "unauthorized";
+    return res.status(401).json({
+      error: {
+        message: "Invalid or missing API key.",
+        type: "invalid_request_error",
+        code: "unauthorized",
+      },
+    });
+  }
+  const clientToken = auth.clientToken;
+  if (auth.source === "db" && auth.key) {
+    req._meter.keyId = auth.key.id;
   }
 
   // 2. Resolve ChatGPT Access Token
@@ -1008,6 +1029,7 @@ app.post("/v1/chat/completions", async (req, res) => {
   const { messages, model, stream, tools, tool_choice } = req.body;
 
   if (!messages || !Array.isArray(messages)) {
+    req._meter.errorCode = "bad_request";
     return res.status(400).json({
       error: {
         message: "Missing 'messages' array in request body.",
@@ -1019,7 +1041,65 @@ app.post("/v1/chat/completions", async (req, res) => {
 
   const promptText = formatMessages(messages, tools, tool_choice);
   const hasTools = Array.isArray(tools) && tools.length > 0 && tool_choice !== "none";
-  const targetModel = model || process.env.DEFAULT_MODEL || "auto";
+  const requestedModel = model || process.env.DEFAULT_MODEL || "auto";
+
+  // Apply per-key model policy.
+  let targetModel = requestedModel;
+  if (auth.source === "db" && auth.key) {
+    if (auth.key.enforced_model) {
+      targetModel = auth.key.enforced_model;
+    } else if (
+      Array.isArray(auth.key.allowed_models) &&
+      auth.key.allowed_models.length > 0 &&
+      !auth.key.allowed_models.includes(requestedModel)
+    ) {
+      req._meter.errorCode = "model_not_allowed";
+      req._meter.errorMessage = `Model '${requestedModel}' not in allowed list for this key.`;
+      req._meter.model = requestedModel;
+      return res.status(403).json({
+        error: {
+          message: `Model '${requestedModel}' is not permitted for this API key.`,
+          type: "invalid_request_error",
+          code: "model_not_allowed",
+        },
+      });
+    }
+  }
+  req._meter.model = targetModel;
+  req._meter.isStream = stream === true;
+
+  // Estimate input tokens up front; output is a rough guess until we see the real reply.
+  const estIn = estimateMessageTokens(messages) + estimateTokens(promptText);
+  const estOut = 512;
+  req._meter.actualIn = estIn;
+
+  // Reserve quota (atomic check + deduct in Postgres). Skips silently when DB
+  // is not configured or when this isn't a metered key.
+  if (auth.source === "db" && auth.key) {
+    const reservation = await reserve(auth.key.id, targetModel, estIn, estOut);
+    if (!reservation.ok && reservation.failingLimits) {
+      req._meter.errorCode = "rate_limited";
+      req._meter.errorMessage = "Rate limit exceeded.";
+      req._meter.status = "rate_limited";
+      return res.status(429).json({
+        error: {
+          message: "Rate limit exceeded for this API key.",
+          type: "rate_limit_error",
+          code: "rate_limited",
+          failing_limits: reservation.failingLimits,
+        },
+      });
+    }
+    if (reservation.ok && reservation.reservationId) {
+      req._meter.reservationId = reservation.reservationId;
+    }
+    // Fail-open on DB errors: log but continue. The dashboard will still see
+    // the request_log row, just no reservation finalization.
+    if (reservation.error) {
+      console.error("[Meter] reserve failed:", reservation.error.message || reservation.error);
+    }
+  }
+
   const parentMessageId = uuidv4();
   const messageId = uuidv4();
   const completionId = `chatcmpl-${uuidv4().replace(/-/g, "").slice(0, 24)}`;
@@ -1089,6 +1169,10 @@ app.post("/v1/chat/completions", async (req, res) => {
     if (!response.ok) {
       const errText = await response.text();
       console.error(`[Proxy] ChatGPT returned error ${response.status}:`, errText);
+      if (req._meter) {
+        req._meter.errorCode = "upstream_error";
+        req._meter.errorMessage = errText.slice(0, 1000);
+      }
       return res.status(response.status).json({
         error: {
           message: `ChatGPT API Error: ${errText}`,
@@ -1168,6 +1252,7 @@ app.post("/v1/chat/completions", async (req, res) => {
               })}\n\n`);
             }
             res.write("data: [DONE]\n\n");
+            req._meter.actualOut = estimateTokens(lastText);
             return res.end();
           }
 
@@ -1228,6 +1313,7 @@ app.post("/v1/chat/completions", async (req, res) => {
 
       // Finish cleanly if loop ends
       res.write("data: [DONE]\n\n");
+      req._meter.actualOut = estimateTokens(lastText);
       return res.end();
     } else {
       // 6. Non-Streaming Response Handling
@@ -1276,6 +1362,9 @@ app.post("/v1/chat/completions", async (req, res) => {
         if (!cleanedText) assistantMsg.content = null;
       }
 
+      const outTokens = estimateTokens(cleanedText) + estimateTokens(JSON.stringify(toolCalls || []));
+      req._meter.actualOut = outTokens;
+
       return res.json({
         id: completionId,
         object: "chat.completion",
@@ -1289,15 +1378,19 @@ app.post("/v1/chat/completions", async (req, res) => {
           }
         ],
         usage: {
-          prompt_tokens: 0,
-          completion_tokens: 0,
-          total_tokens: 0
+          prompt_tokens: req._meter.actualIn || 0,
+          completion_tokens: outTokens,
+          total_tokens: (req._meter.actualIn || 0) + outTokens
         }
       });
     }
 
   } catch (err) {
     console.error("[Proxy] Unexpected server error during fetch:", err.message);
+    if (req._meter) {
+      req._meter.errorCode = "internal_server_error";
+      req._meter.errorMessage = err.message;
+    }
     if (!res.headersSent) {
       return res.status(500).json({
         error: {
@@ -1492,13 +1585,35 @@ function chatToResponses(chatJson, responseId, callIdToToolCallId) {
 }
 
 app.post("/v1/responses", async (req, res) => {
+  installMeterHook(req, res);
+
+  // Authenticate + apply per-key model policy at this layer; the inner call to
+  // /v1/chat/completions is bypassed via X-Internal-Bypass so it doesn't double-meter.
+  const auth = await authenticateRequest(req);
+  if (!auth.authorized) {
+    req._meter.errorCode = "unauthorized";
+    return res.status(401).json({
+      error: {
+        message: "Invalid or missing API key.",
+        type: "invalid_request_error",
+        code: "unauthorized",
+      },
+    });
+  }
+  if (auth.source === "db" && auth.key) {
+    req._meter.keyId = auth.key.id;
+  }
+
   const responseId = `resp_${uuidv4().replace(/-/g, "")}`;
   const wantsStream = req.body?.stream === true;
+  req._meter.isStream = wantsStream;
 
   let translated;
   try {
     translated = responsesToChat(req.body || {});
   } catch (err) {
+    req._meter.errorCode = "bad_request";
+    req._meter.errorMessage = err.message;
     return res.status(400).json({
       error: {
         message: `Failed to translate Responses request: ${err.message}`,
@@ -1509,6 +1624,7 @@ app.post("/v1/responses", async (req, res) => {
   }
 
   if (req.body?.previous_response_id || req.body?.conversation) {
+    req._meter.errorCode = "stateful_not_supported";
     return res.status(400).json({
       error: {
         message:
@@ -1521,6 +1637,59 @@ app.post("/v1/responses", async (req, res) => {
 
   const { chatBody, callIdToToolCallId } = translated;
 
+  // Apply per-key model policy on the translated chat body.
+  const requestedModel = chatBody.model || process.env.DEFAULT_MODEL || "auto";
+  let effectiveModel = requestedModel;
+  if (auth.source === "db" && auth.key) {
+    if (auth.key.enforced_model) {
+      effectiveModel = auth.key.enforced_model;
+    } else if (
+      Array.isArray(auth.key.allowed_models) &&
+      auth.key.allowed_models.length > 0 &&
+      !auth.key.allowed_models.includes(requestedModel)
+    ) {
+      req._meter.errorCode = "model_not_allowed";
+      req._meter.errorMessage = `Model '${requestedModel}' not in allowed list for this key.`;
+      req._meter.model = requestedModel;
+      return res.status(403).json({
+        error: {
+          message: `Model '${requestedModel}' is not permitted for this API key.`,
+          type: "invalid_request_error",
+          code: "model_not_allowed",
+        },
+      });
+    }
+  }
+  chatBody.model = effectiveModel;
+  req._meter.model = effectiveModel;
+
+  const estIn = estimateMessageTokens(chatBody.messages || []);
+  const estOut = 512;
+  req._meter.actualIn = estIn;
+
+  if (auth.source === "db" && auth.key) {
+    const reservation = await reserve(auth.key.id, effectiveModel, estIn, estOut);
+    if (!reservation.ok && reservation.failingLimits) {
+      req._meter.errorCode = "rate_limited";
+      req._meter.errorMessage = "Rate limit exceeded.";
+      req._meter.status = "rate_limited";
+      return res.status(429).json({
+        error: {
+          message: "Rate limit exceeded for this API key.",
+          type: "rate_limit_error",
+          code: "rate_limited",
+          failing_limits: reservation.failingLimits,
+        },
+      });
+    }
+    if (reservation.ok && reservation.reservationId) {
+      req._meter.reservationId = reservation.reservationId;
+    }
+    if (reservation.error) {
+      console.error("[Meter] reserve failed:", reservation.error.message || reservation.error);
+    }
+  }
+
   // Always non-streaming internally — we buffer the Chat response and either
   // return JSON or synthesize Responses-shape SSE events.
   const internalBody = { ...chatBody, stream: false };
@@ -1532,15 +1701,20 @@ app.post("/v1/responses", async (req, res) => {
       headers: {
         "Content-Type": "application/json",
         Authorization: req.headers.authorization || "",
+        "X-Internal-Bypass": INTERNAL_BYPASS_TOKEN,
       },
       body: JSON.stringify(internalBody),
     });
     if (!internalRes.ok) {
       const errText = await internalRes.text();
+      req._meter.errorCode = "upstream_error";
+      req._meter.errorMessage = errText.slice(0, 1000);
       return res.status(internalRes.status).send(errText);
     }
     chatJson = await internalRes.json();
   } catch (err) {
+    req._meter.errorCode = "internal_server_error";
+    req._meter.errorMessage = err.message;
     return res.status(500).json({
       error: {
         message: `Internal bridge call failed: ${err.message}`,
@@ -1551,6 +1725,7 @@ app.post("/v1/responses", async (req, res) => {
   }
 
   const responseBody = chatToResponses(chatJson, responseId, callIdToToolCallId);
+  req._meter.actualOut = chatJson?.usage?.completion_tokens || 0;
 
   if (!wantsStream) {
     return res.json(responseBody);

@@ -4,6 +4,7 @@ services:
     runtime: node
     plan: free
     region: oregon
+    repo: https://github.com/utksh1/chatgpt-to-api
     branch: main
     buildCommand: npm install
     startCommand: npm start
@@ -22,4 +23,8 @@ services:
       - key: CHATGPT_SESSION_TOKEN
         sync: false
       - key: CHATGPT_COOKIES
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false

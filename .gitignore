@@ -16,4 +16,7 @@ coverage/
 
 .vscode/
 .idea/
+.claude/
+.netlify/
+*.tsbuildinfo
 

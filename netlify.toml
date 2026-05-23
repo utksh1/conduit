@@ -1,0 +1,52 @@
+[build]
+  base    = "dashboard"
+  command = "npm install && npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+[functions]
+  directory     = "../netlify/functions"
+  node_bundler  = "esbuild"
+  included_files = ["../netlify/functions/_lib/**"]
+
+[[redirects]]
+  from   = "/api/auth/*"
+  to     = "/.netlify/functions/auth/:splat"
+  status = 200
+
+[[redirects]]
+  from   = "/api/keys"
+  to     = "/.netlify/functions/keys"
+  status = 200
+
+[[redirects]]
+  from   = "/api/keys/*"
+  to     = "/.netlify/functions/keys/:splat"
+  status = 200
+
+[[redirects]]
+  from   = "/api/logs"
+  to     = "/.netlify/functions/logs"
+  status = 200
+
+[[redirects]]
+  from   = "/api/metrics"
+  to     = "/.netlify/functions/metrics"
+  status = 200
+
+[[redirects]]
+  from   = "/api/settings"
+  to     = "/.netlify/functions/settings"
+  status = 200
+
+[[redirects]]
+  from   = "/api/audit"
+  to     = "/.netlify/functions/audit"
+  status = 200
+
+[[redirects]]
+  from   = "/*"
+  to     = "/index.html"
+  status = 200
