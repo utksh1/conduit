@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: chatgpt-to-api
+    runtime: node
+    plan: free
+    region: oregon
+    branch: main
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /ping
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: PORT
+        value: "10000"
+      - key: DEFAULT_MODEL
+        value: gpt-5.5-thinking
+      - key: PROXY_API_KEY
+        sync: false
+      - key: CHATGPT_ACCESS_TOKEN
+        sync: false
+      - key: CHATGPT_SESSION_TOKEN
+        sync: false
+      - key: CHATGPT_COOKIES
+        sync: false
