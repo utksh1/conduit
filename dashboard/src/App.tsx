@@ -10,6 +10,7 @@ import ApiKeys from "@/pages/ApiKeys";
 import Logs from "@/pages/Logs";
 import Settings from "@/pages/Settings";
 import Audit from "@/pages/Audit";
+import Chat from "@/pages/Chat";
 
 function Root() {
   const token = useAuth((s) => s.token);
@@ -40,6 +41,7 @@ export default function App() {
         <Route element={<Protected />}>
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/keys" element={<ApiKeys />} />
+          <Route path="/chat" element={<Chat />} />
           <Route path="/logs" element={<Logs />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="/audit" element={<Audit />} />
