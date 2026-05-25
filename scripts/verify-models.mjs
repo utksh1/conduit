@@ -6,7 +6,12 @@ process.stdout.on("error", (err) => {
 });
 
 async function getModels() {
-  const r = await fetch(`${BASE_URL}/models`);
+  const headers = {};
+  const apiKey = process.env.PROXY_API_KEY || process.env.API_KEY;
+  if (apiKey) {
+    headers["Authorization"] = `Bearer ${apiKey}`;
+  }
+  const r = await fetch(`${BASE_URL}/models`, { headers });
   if (!r.ok) throw new Error(`GET /models failed: ${r.status}`);
   const j = await r.json();
   const ids = (j?.data || []).map((m) => m.id).filter(Boolean);
@@ -27,9 +32,15 @@ async function chatOnce(modelId) {
     ],
   };
 
+  const headers = { "Content-Type": "application/json" };
+  const apiKey = process.env.PROXY_API_KEY || process.env.API_KEY;
+  if (apiKey) {
+    headers["Authorization"] = `Bearer ${apiKey}`;
+  }
+
   const r = await fetch(`${BASE_URL}/chat/completions`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify(payload),
   });
 
