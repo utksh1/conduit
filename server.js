@@ -896,7 +896,7 @@ async function getChatRequirements(accessToken, cookieHeader) {
   });
   if (!resp.ok) {
     const errText = await resp.text();
-    console.error('[Proxy] Sentinel requirements fetch error', resp.status, errText.slice(0, 500));
+    console.error('[Proxy] Sentinel requirements fetch error', resp.status, errText.slice(0, 800).replace(/\s+/g, ' '));
     throw new Error(`Sentinel requirements fetch failed: ${resp.status}`);
   }
   const data = await resp.json();
