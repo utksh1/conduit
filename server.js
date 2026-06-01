@@ -676,17 +676,29 @@ function buildToolSystemPrompt(tools, toolChoice) {
   }
 
   return [
-    "You have access to the following tools. When you want to call a tool, emit a block of the exact form:",
+    "You have access to function tools. To invoke a tool, emit a block of EXACTLY this form (the parser is strict):",
     "<tool_call>",
-    '{"name": "<tool_name>", "arguments": <json_object_of_arguments>}',
+    '{"name": "<tool_name>", "arguments": <json_object>}',
     "</tool_call>",
     "",
     "Rules:",
-    "- Emit one <tool_call>...</tool_call> block per call. You may emit multiple blocks in a single reply.",
-    "- `arguments` MUST be a valid JSON object (not a string).",
-    "- Do NOT wrap tool calls in markdown code fences.",
-    "- After tool results come back (as <tool_result id=\"...\">...</tool_result> user messages), continue the conversation or call more tools.",
-    "- Only emit prose outside <tool_call> blocks when you have a final answer for the user.",
+    "- One tool call per <tool_call>...</tool_call> block. Multiple blocks per reply are allowed (parallel calls).",
+    "- `arguments` MUST be a JSON object literal, not a stringified JSON.",
+    "- No code fences around the block. No `<call>`, `<function_call>`, or other aliases — use `<tool_call>` literally.",
+    "- After a tool result arrives (as `<tool_result id=\"...\">...</tool_result>` in a user turn), continue the conversation or emit more tool calls.",
+    "- Only emit prose outside `<tool_call>` blocks when you are giving the final answer for this turn.",
+    "",
+    "CORRECT:",
+    "<tool_call>",
+    '{"name": "search_files", "arguments": {"pattern": "*.py", "path": "/src"}}',
+    "</tool_call>",
+    "",
+    "WRONG (do not do these):",
+    "  ```json",
+    '  {"name": "search_files", "arguments": {...}}    ← bare fenced JSON, missing <tool_call> tags',
+    "  ```",
+    '  <tool_call>{"name":"search_files","arguments":"{\\"pattern\\":\\"*.py\\"}"}</tool_call>    ← arguments stringified instead of an object',
+    '  I will call search_files({"pattern":"*.py"})    ← prose call instead of the protocol',
     "",
     "Available tools:",
     fns,
@@ -772,43 +784,161 @@ function formatMessages(messages, tools, toolChoice) {
 }
 
 /**
- * Scans assistant text for <tool_call>...</tool_call> blocks and extracts them
- * as OpenAI-format tool_calls. Returns { cleanedText, toolCalls }.
+ * When the client sends a tools[] array, instant models drift out of the
+ * <tool_call> format on long agentic loops. Thinking variants plan in CoT
+ * before emitting, so they hold the protocol much better. This upgrades
+ * the model selection when tools are present and the caller didn't ask for
+ * a specific thinking/reasoning model already. Disable with
+ * TOOL_FORCE_THINKING=false in env.
  */
+function enforceThinkingForTools(requestedModel, hasTools) {
+  if (!hasTools) return requestedModel;
+  if (process.env.TOOL_FORCE_THINKING === "false") return requestedModel;
+  const m = (requestedModel || "").toLowerCase();
+  // Already a thinking/reasoning model — leave it alone.
+  if (m.includes("thinking") || m.includes("reasoning") || m === "o3" || m === "o4" || m.startsWith("o1")) {
+    return requestedModel;
+  }
+  // Auto / instant / unspecified → upgrade.
+  return "gpt-5-5-thinking";
+}
+
+/**
+ * Scans assistant text for tool-call blocks and extracts them as OpenAI-format
+ * tool_calls. Tolerant of common malformations:
+ *   - alias openers/closers (<tool_call>, <call>, <function_call>, <tool>)
+ *   - unclosed final block (we parse up to end-of-text)
+ *   - code fences inside the block (```json ... ```)
+ *   - leading/trailing prose like "Calling tool: <tool_call>..."
+ *   - field aliases: name|function|tool, arguments|args|input|parameters
+ *   - single-quoted JSON, trailing commas, unquoted keys (best-effort repair)
+ *   - bare fenced JSON code blocks that look like a tool call, when no XML tag exists
+ *
+ * Returns { cleanedText, toolCalls }. cleanedText is the original text with all
+ * recognized tool-call blocks removed.
+ */
+function repairLooseJson(s) {
+  // Best-effort: strip code fences, trailing commas, single quotes around keys/values.
+  let t = s.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+  // Drop trailing commas before } or ]
+  t = t.replace(/,(\s*[}\]])/g, "$1");
+  // Single-quoted "strings" to double-quoted (only for keys / simple values; risky in general
+  // but the model rarely emits real apostrophes inside JSON values).
+  if (!t.includes('"') && t.includes("'")) {
+    t = t.replace(/'/g, '"');
+  }
+  return t;
+}
+
+function tryParseToolCallBody(raw) {
+  if (!raw) return null;
+  const candidates = [raw, repairLooseJson(raw)];
+  for (const cand of candidates) {
+    try { return JSON.parse(cand); } catch { /* try next */ }
+  }
+  // Last-ditch: pull the largest balanced {...} from the candidate.
+  const match = raw.match(/\{[\s\S]*\}/);
+  if (match) {
+    try { return JSON.parse(match[0]); } catch {}
+    try { return JSON.parse(repairLooseJson(match[0])); } catch {}
+  }
+  return null;
+}
+
+function buildToolCall(parsed, idx) {
+  if (!parsed || typeof parsed !== "object") return null;
+  const name = parsed.name || parsed.function || parsed.tool || parsed.tool_name;
+  if (!name || typeof name !== "string") return null;
+  const args = parsed.arguments ?? parsed.args ?? parsed.input ?? parsed.parameters ?? {};
+  return {
+    id: parsed.id || `call_${Date.now().toString(36)}_${idx}`,
+    type: "function",
+    function: {
+      name,
+      arguments: typeof args === "string" ? args : JSON.stringify(args),
+    },
+  };
+}
+
 function extractToolCalls(text) {
   if (!text || typeof text !== "string") return { cleanedText: text || "", toolCalls: [] };
 
   const toolCalls = [];
-  const re = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
-  let cleanedText = text;
-  let m;
+  // Aliases the model is observed to emit. Order matters: match the most specific first.
+  const openers = ["<tool_call>", "<function_call>", "<call>", "<tool>"];
+  const closers = ["</tool_call>", "</function_call>", "</call>", "</tool>"];
+
+  const spans = []; // [{start, end}] of recognized blocks, to strip later
   let idx = 0;
 
-  while ((m = re.exec(text)) !== null) {
-    let parsed = null;
-    const raw = m[1].trim();
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      const fenced = raw.replace(/^```(?:json)?\s*|\s*```$/g, "");
-      try { parsed = JSON.parse(fenced); } catch { /* skip malformed */ }
+  // Pass 1: find every opener and try to pair with the nearest closer (any alias).
+  let cursor = 0;
+  while (cursor < text.length) {
+    let bestOpenAt = -1;
+    let bestOpenLen = 0;
+    for (const o of openers) {
+      const at = text.indexOf(o, cursor);
+      if (at !== -1 && (bestOpenAt === -1 || at < bestOpenAt)) {
+        bestOpenAt = at;
+        bestOpenLen = o.length;
+      }
     }
-    if (parsed && parsed.name) {
-      const args = parsed.arguments ?? parsed.args ?? {};
-      toolCalls.push({
-        id: parsed.id || `call_${Date.now().toString(36)}_${idx}`,
-        type: "function",
-        function: {
-          name: parsed.name,
-          arguments: typeof args === "string" ? args : JSON.stringify(args),
-        },
-      });
+    if (bestOpenAt === -1) break;
+
+    const bodyStart = bestOpenAt + bestOpenLen;
+    let bestCloseAt = -1;
+    let bestCloseLen = 0;
+    for (const c of closers) {
+      const at = text.indexOf(c, bodyStart);
+      if (at !== -1 && (bestCloseAt === -1 || at < bestCloseAt)) {
+        bestCloseAt = at;
+        bestCloseLen = c.length;
+      }
+    }
+
+    let bodyEnd, blockEnd;
+    if (bestCloseAt === -1) {
+      // Unclosed final block — parse whatever follows up to end of text.
+      bodyEnd = text.length;
+      blockEnd = text.length;
+    } else {
+      bodyEnd = bestCloseAt;
+      blockEnd = bestCloseAt + bestCloseLen;
+    }
+
+    const body = text.slice(bodyStart, bodyEnd).trim();
+    const parsed = tryParseToolCallBody(body);
+    const built = buildToolCall(parsed, idx);
+    if (built) {
+      toolCalls.push(built);
       idx++;
+      spans.push({ start: bestOpenAt, end: blockEnd });
+    }
+    cursor = blockEnd;
+  }
+
+  // Pass 2: if no XML-tagged blocks were found at all, look for a bare fenced JSON
+  // block that has a "name" and "arguments" — model sometimes drops the tags entirely.
+  if (toolCalls.length === 0) {
+    const fenceRe = /```(?:json)?\s*([\s\S]*?)\s*```/g;
+    let m;
+    while ((m = fenceRe.exec(text)) !== null) {
+      const parsed = tryParseToolCallBody(m[1]);
+      const built = buildToolCall(parsed, idx);
+      if (built) {
+        toolCalls.push(built);
+        idx++;
+        spans.push({ start: m.index, end: m.index + m[0].length });
+      }
     }
   }
 
-  cleanedText = cleanedText.replace(re, "").trim();
-  return { cleanedText, toolCalls };
+  // Strip recognized spans from cleanedText (in reverse so indices stay valid).
+  let cleanedText = text;
+  for (const { start, end } of spans.sort((a, b) => b.start - a.start)) {
+    cleanedText = cleanedText.slice(0, start) + cleanedText.slice(end);
+  }
+  return { cleanedText: cleanedText.trim(), toolCalls };
 }
 
 /**
@@ -1041,7 +1171,7 @@ app.post("/v1/chat/completions", async (req, res) => {
 
   const promptText = formatMessages(messages, tools, tool_choice);
   const hasTools = Array.isArray(tools) && tools.length > 0 && tool_choice !== "none";
-  const requestedModel = model || process.env.DEFAULT_MODEL || "auto";
+  const requestedModel = enforceThinkingForTools(model || process.env.DEFAULT_MODEL || "auto", hasTools);
 
   // Apply per-key model policy.
   let targetModel = requestedModel;
@@ -1638,7 +1768,8 @@ app.post("/v1/responses", async (req, res) => {
   const { chatBody, callIdToToolCallId } = translated;
 
   // Apply per-key model policy on the translated chat body.
-  const requestedModel = chatBody.model || process.env.DEFAULT_MODEL || "auto";
+  const responseHasTools = Array.isArray(chatBody.tools) && chatBody.tools.length > 0 && chatBody.tool_choice !== "none";
+  const requestedModel = enforceThinkingForTools(chatBody.model || process.env.DEFAULT_MODEL || "auto", responseHasTools);
   let effectiveModel = requestedModel;
   if (auth.source === "db" && auth.key) {
     if (auth.key.enforced_model) {
