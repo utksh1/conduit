@@ -29,6 +29,42 @@ app.use(express.json());
 let cachedAccessToken = null;
 let tokenExpiresAt = null;
 
+// Stateful conversation mapping cache
+// Key: SHA-256 hash of serialization of messages array prefix (up to the parent message).
+// Value: { conversationId, parentMessageId, originalToolCalls: {} }
+const conversationCache = new Map();
+const MAX_CACHE_SIZE = 10000;
+const SERVER_TOOLS = new Set(["browser", "python", "dalle", "myfiles_browser"]);
+
+function getMessagesHash(messages) {
+  if (!messages || messages.length === 0) return "root";
+  
+  // Create a clean representation of the message array to hash.
+  const cleanMessages = messages.map(m => ({
+    role: m.role,
+    content: typeof m.content === "string" 
+      ? m.content 
+      : Array.isArray(m.content)
+        ? m.content.map(p => p?.text || "").join("")
+        : JSON.stringify(m.content ?? ""),
+    name: m.name || null,
+    tool_calls: m.tool_calls || null,
+    tool_call_id: m.tool_call_id || null
+  }));
+  
+  const serialized = JSON.stringify(cleanMessages);
+  return crypto.createHash("sha256").update(serialized).digest("hex");
+}
+
+function cacheConversationMapping(prefixHash, conversationId, parentMessageId, originalToolCalls = {}) {
+  if (conversationCache.size >= MAX_CACHE_SIZE) {
+    // Delete the oldest entry (FIFO)
+    const firstKey = conversationCache.keys().next().value;
+    if (firstKey) conversationCache.delete(firstKey);
+  }
+  conversationCache.set(prefixHash, { conversationId, parentMessageId, originalToolCalls });
+}
+
 // OpenAPI / Swagger spec — describes the OpenAI-compatible surface of this gateway.
 const SUPPORTED_MODELS = [
   "gpt-5-5",
@@ -1076,15 +1112,16 @@ function categorizeMessage(parsed) {
   const contentParts = message.content?.parts || [];
   const text = contentParts[0] || "";
   const metadata = message.metadata || {};
+  const recipient = message.recipient || "all";
 
   if (role === "assistant") {
-    return { type: "assistant", text, metadata, authorName };
+    return { type: "assistant", text, metadata, authorName, recipient };
   }
   if (role === "tool") {
-    return { type: "tool", text, metadata, authorName };
+    return { type: "tool", text, metadata, authorName, recipient };
   }
   if (role === "system") {
-    return { type: "system", text, metadata, authorName };
+    return { type: "system", text, metadata, authorName, recipient };
   }
   return null;
 }
@@ -1383,38 +1420,124 @@ app.post("/v1/chat/completions", async (req, res) => {
     }
   }
 
-  const parentMessageId = uuidv4();
-  const messageId = uuidv4();
+  const statefulEnabled = process.env.STATEFUL_MAPPING !== "false";
+  let isStateful = false;
+  let conversationId = null;
+  let parentMessageId = null;
+  let originalToolCalls = {};
+
+  const N = messages.length - 1;
+  const lastMsg = messages[N];
+  const prefix = messages.slice(0, N);
+  const prefixHash = getMessagesHash(prefix);
+
+  if (statefulEnabled) {
+    const cached = conversationCache.get(prefixHash);
+    if (cached) {
+      isStateful = true;
+      conversationId = cached.conversationId;
+      parentMessageId = cached.parentMessageId;
+      originalToolCalls = cached.originalToolCalls || {};
+      console.log(`[Proxy] Stateful cache HIT for prefix hash ${prefixHash}. Convo: ${conversationId}, Parent: ${parentMessageId}`);
+    } else if (messages.length === 1) {
+      // First message, start stateful conversation
+      isStateful = true;
+      parentMessageId = uuidv4();
+      console.log(`[Proxy] Stateful cache MISS but messages.length === 1. Starting new stateful conversation.`);
+    } else {
+      console.log(`[Proxy] Stateful cache MISS for multi-turn history. Falling back to prompt-engineered collapsed history.`);
+    }
+  }
+
   const completionId = `chatcmpl-${uuidv4().replace(/-/g, "").slice(0, 24)}`;
   let upstreamModelSlug = null; // best-effort: what ChatGPT backend says it used (if provided)
 
-  const chatgptPayload = {
-    action: "next",
-    messages: [
-      {
-        id: messageId,
-        author: {
-          role: "user"
-        },
-        content: {
-          content_type: "text",
-          parts: [promptText]
-        },
-        metadata: {}
+  let chatgptPayload;
+  let chatgptMessageId = uuidv4();
+
+  if (isStateful) {
+    let authorRole = lastMsg.role;
+    let authorName = lastMsg.name || undefined;
+    let contentParts = [];
+    let messageMetadata = {};
+
+    if (authorRole === "tool") {
+      // It's a tool execution result.
+      // Map tool_call_id back to ChatGPT message ID if we can.
+      const cachedTool = originalToolCalls[lastMsg.tool_call_id];
+      if (cachedTool) {
+        authorName = cachedTool.name;
+        // If it was a custom tool call (Action), we send custom_tool_call_output
+        messageMetadata.custom_tool_call_output = {
+          call_id: cachedTool.call_id,
+          output: typeof lastMsg.content === "string" ? lastMsg.content : JSON.stringify(lastMsg.content)
+        };
       }
-    ],
-    parent_message_id: parentMessageId,
-    model: targetModel,
-    timezone_offset_min: -330,
-    history_and_training_disabled: false,
-    conversation_mode: {
-      kind: "primary_assistant"
-    },
-    force_paragen: false,
-    force_paragen_model_slug: "",
-    force_nulligen: false,
-    force_rate_limit: false
-  };
+      contentParts = [typeof lastMsg.content === "string" ? lastMsg.content : JSON.stringify(lastMsg.content)];
+    } else {
+      // User message
+      contentParts = [typeof lastMsg.content === "string" ? lastMsg.content : JSON.stringify(lastMsg.content)];
+    }
+
+    chatgptPayload = {
+      action: "next",
+      messages: [
+        {
+          id: chatgptMessageId,
+          author: {
+            role: authorRole,
+            name: authorName
+          },
+          content: {
+            content_type: "text",
+            parts: contentParts
+          },
+          metadata: messageMetadata
+        }
+      ],
+      parent_message_id: parentMessageId,
+      conversation_id: conversationId || undefined,
+      model: targetModel,
+      timezone_offset_min: -330,
+      history_and_training_disabled: false,
+      conversation_mode: {
+        kind: "primary_assistant"
+      },
+      force_paragen: false,
+      force_paragen_model_slug: "",
+      force_nulligen: false,
+      force_rate_limit: false
+    };
+  } else {
+    // Collapsed prompt-engineered fallback
+    chatgptPayload = {
+      action: "next",
+      messages: [
+        {
+          id: chatgptMessageId,
+          author: {
+            role: "user"
+          },
+          content: {
+            content_type: "text",
+            parts: [promptText]
+          },
+          metadata: {}
+        }
+      ],
+      parent_message_id: uuidv4(),
+      model: targetModel,
+      timezone_offset_min: -330,
+      history_and_training_disabled: false,
+      conversation_mode: {
+        kind: "primary_assistant"
+      },
+      force_paragen: false,
+      force_paragen_model_slug: "",
+      force_nulligen: false,
+      force_rate_limit: false
+    };
+  }
 
   // 4. Send request to ChatGPT Web Backend
   console.log(`[Proxy] Routing request to ChatGPT (Model: ${targetModel}, Stream: ${stream === true})`);
@@ -1475,6 +1598,9 @@ app.post("/v1/chat/completions", async (req, res) => {
       let buffer = "";
       let bufferedFull = ""; // used when hasPromptTools — we can't stream tokens through a tool parser
       let streamAnnotations = []; // URL citations from native search
+      let activeStreamingToolCall = null;
+      let latestMessageId = null;
+      let latestConversationId = null;
 
       for await (const chunk of response.body) {
         buffer += new TextDecoder().decode(chunk);
@@ -1486,7 +1612,45 @@ app.post("/v1/chat/completions", async (req, res) => {
           if (!trimmed) continue;
 
           if (trimmed === "data: [DONE]") {
-            if (hasPromptTools) {
+            if (activeStreamingToolCall) {
+              res.write(`data: ${JSON.stringify({
+                id: completionId,
+                object: "chat.completion.chunk",
+                created: Math.floor(Date.now() / 1000),
+                model: upstreamModelSlug || targetModel,
+                choices: [{
+                  index: 0,
+                  delta: {},
+                  finish_reason: "tool_calls"
+                }]
+              })}\n\n`);
+
+              if (isStateful && latestConversationId && latestMessageId) {
+                const assistantResponse = {
+                  role: "assistant",
+                  content: null,
+                  tool_calls: [{
+                    id: activeStreamingToolCall.toolCallId,
+                    type: "function",
+                    function: {
+                      name: activeStreamingToolCall.name,
+                      arguments: activeStreamingToolCall.lastArguments
+                    }
+                  }]
+                };
+                const newOriginalToolCalls = {
+                  ...originalToolCalls,
+                  [activeStreamingToolCall.toolCallId]: {
+                    call_id: activeStreamingToolCall.messageId,
+                    name: activeStreamingToolCall.name
+                  }
+                };
+                const nextHash = getMessagesHash(messages.concat([assistantResponse]));
+                cacheConversationMapping(nextHash, latestConversationId, latestMessageId, newOriginalToolCalls);
+                console.log(`[Proxy] Cached stateful tool call: Hash ${nextHash}, Convo: ${latestConversationId}, Msg: ${latestMessageId}`);
+              }
+              activeStreamingToolCall = null;
+            } else if (hasPromptTools) {
               const { cleanedText, toolCalls } = extractToolCalls(bufferedFull);
               const finalModel = upstreamModelSlug || targetModel;
               if (toolCalls.length > 0) {
@@ -1544,6 +1708,16 @@ app.post("/v1/chat/completions", async (req, res) => {
                 model: upstreamModelSlug || targetModel,
                 choices: [{ index: 0, delta: finalDelta, finish_reason: "stop" }]
               })}\n\n`);
+
+              if (isStateful && latestConversationId && latestMessageId) {
+                const assistantResponse = {
+                  role: "assistant",
+                  content: lastText || null
+                };
+                const nextHash = getMessagesHash(messages.concat([assistantResponse]));
+                cacheConversationMapping(nextHash, latestConversationId, latestMessageId, originalToolCalls);
+                console.log(`[Proxy] Cached stateful response: Hash ${nextHash}, Convo: ${latestConversationId}, Msg: ${latestMessageId}`);
+              }
             }
             res.write("data: [DONE]\n\n");
             req._meter.actualOut = estimateTokens(lastText);
@@ -1556,6 +1730,11 @@ app.post("/v1/chat/completions", async (req, res) => {
               if (jsonStr === "[DONE]") continue;
 
               const parsed = JSON.parse(jsonStr);
+              latestConversationId = latestConversationId || parsed?.conversation_id;
+              if (parsed?.message?.id) {
+                latestMessageId = parsed.message.id;
+              }
+
               // Best-effort extraction of upstream-selected model slug (fields vary over time)
               upstreamModelSlug =
                 upstreamModelSlug ||
@@ -1568,6 +1747,65 @@ app.post("/v1/chat/completions", async (req, res) => {
               const cat = categorizeMessage(parsed);
 
               if (cat?.type === "assistant") {
+                // Check if it's a client-side tool call
+                if (cat.recipient && cat.recipient !== "all" && !SERVER_TOOLS.has(cat.recipient)) {
+                  const msgId = parsed.message.id;
+                  if (!activeStreamingToolCall || activeStreamingToolCall.messageId !== msgId) {
+                    activeStreamingToolCall = {
+                      messageId: msgId,
+                      toolCallId: "call_" + msgId,
+                      name: cat.recipient,
+                      lastArguments: ""
+                    };
+                    res.write(`data: ${JSON.stringify({
+                      id: completionId,
+                      object: "chat.completion.chunk",
+                      created: Math.floor(Date.now() / 1000),
+                      model: upstreamModelSlug || targetModel,
+                      choices: [{
+                        index: 0,
+                        delta: {
+                          role: "assistant",
+                          tool_calls: [{
+                            index: 0,
+                            id: activeStreamingToolCall.toolCallId,
+                            type: "function",
+                            function: {
+                              name: activeStreamingToolCall.name,
+                              arguments: ""
+                            }
+                          }]
+                        },
+                        finish_reason: null
+                      }]
+                    })}\n\n`);
+                  }
+
+                  const delta = cat.text.slice(activeStreamingToolCall.lastArguments.length);
+                  if (delta) {
+                    activeStreamingToolCall.lastArguments = cat.text;
+                    res.write(`data: ${JSON.stringify({
+                      id: completionId,
+                      object: "chat.completion.chunk",
+                      created: Math.floor(Date.now() / 1000),
+                      model: upstreamModelSlug || targetModel,
+                      choices: [{
+                        index: 0,
+                        delta: {
+                          tool_calls: [{
+                            index: 0,
+                            function: {
+                              arguments: delta
+                            }
+                          }]
+                        },
+                        finish_reason: null
+                      }]
+                    })}\n\n`);
+                  }
+                  continue; // Skip normal text delta rendering for tool calls
+                }
+
                 const currentText = cat.text || "";
 
                 // Collect annotations from assistant metadata
@@ -1629,6 +1867,9 @@ app.post("/v1/chat/completions", async (req, res) => {
       let buffer = "";
       let nativeToolOutputs = []; // Collect native tool messages (browser, python, etc.)
       let collectedAnnotations = []; // URL citations from native search
+      let latestMessageId = null;
+      let latestConversationId = null;
+      let collectedToolCalls = [];
 
       for await (const chunk of response.body) {
         buffer += new TextDecoder().decode(chunk);
@@ -1644,6 +1885,11 @@ app.post("/v1/chat/completions", async (req, res) => {
               if (jsonStr === "[DONE]") continue;
 
               const parsed = JSON.parse(jsonStr);
+              latestConversationId = latestConversationId || parsed?.conversation_id;
+              if (parsed?.message?.id) {
+                latestMessageId = parsed.message.id;
+              }
+
               // Best-effort extraction of upstream-selected model slug (fields vary over time)
               upstreamModelSlug =
                 upstreamModelSlug ||
@@ -1655,11 +1901,29 @@ app.post("/v1/chat/completions", async (req, res) => {
 
               const cat = categorizeMessage(parsed);
               if (cat?.type === "assistant") {
-                fullContent = cat.text || fullContent;
-                // Collect annotations from assistant message metadata too
-                const msgAnnotations = extractAnnotations(cat.metadata);
-                if (msgAnnotations.length > 0) {
-                  collectedAnnotations.push(...msgAnnotations);
+                // Check if it's a client-side tool call
+                if (cat.recipient && cat.recipient !== "all" && !SERVER_TOOLS.has(cat.recipient)) {
+                  const toolCallId = "call_" + parsed.message.id;
+                  if (!collectedToolCalls.some(tc => tc.id === toolCallId)) {
+                    collectedToolCalls.push({
+                      id: toolCallId,
+                      type: "function",
+                      function: {
+                        name: cat.recipient,
+                        arguments: cat.text
+                      }
+                    });
+                  } else {
+                    const tc = collectedToolCalls.find(tc => tc.id === toolCallId);
+                    if (tc) tc.function.arguments = cat.text;
+                  }
+                } else {
+                  fullContent = cat.text || fullContent;
+                  // Collect annotations from assistant message metadata too
+                  const msgAnnotations = extractAnnotations(cat.metadata);
+                  if (msgAnnotations.length > 0) {
+                    collectedAnnotations.push(...msgAnnotations);
+                  }
                 }
               } else if (cat?.type === "tool") {
                 // Native tool output (browser search, code interpreter, etc.)
@@ -1682,16 +1946,50 @@ app.post("/v1/chat/completions", async (req, res) => {
         }
       }
 
-      // Only run prompt-engineered tool extraction when we have prompt-engineered tools
-      const { cleanedText, toolCalls } = hasPromptTools
-        ? extractToolCalls(fullContent)
-        : { cleanedText: fullContent, toolCalls: [] };
+      const assistantMsg = { role: "assistant", content: null };
+      let finishReason = "stop";
 
-      const assistantMsg = { role: "assistant", content: cleanedText || null };
-      if (toolCalls.length > 0) {
-        assistantMsg.tool_calls = toolCalls;
-        if (!cleanedText) assistantMsg.content = null;
+      if (collectedToolCalls.length > 0) {
+        assistantMsg.tool_calls = collectedToolCalls;
+        assistantMsg.content = null;
+        finishReason = "tool_calls";
+
+        // Cache the state for tool call!
+        if (isStateful && latestConversationId && latestMessageId) {
+          const newOriginalToolCalls = { ...originalToolCalls };
+          for (const tc of collectedToolCalls) {
+            newOriginalToolCalls[tc.id] = {
+              call_id: tc.id.replace(/^call_/, ""),
+              name: tc.function.name
+            };
+          }
+          const nextHash = getMessagesHash(messages.concat([assistantMsg]));
+          cacheConversationMapping(nextHash, latestConversationId, latestMessageId, newOriginalToolCalls);
+          console.log(`[Proxy] (Non-stream) Cached stateful tool call: Hash ${nextHash}, Convo: ${latestConversationId}, Msg: ${latestMessageId}`);
+        }
+      } else {
+        // Only run prompt-engineered tool extraction when we have prompt-engineered tools
+        const { cleanedText, toolCalls } = hasPromptTools
+          ? extractToolCalls(fullContent)
+          : { cleanedText: fullContent, toolCalls: [] };
+
+        if (toolCalls.length > 0) {
+          assistantMsg.tool_calls = toolCalls;
+          if (!cleanedText) assistantMsg.content = null;
+          finishReason = "tool_calls";
+        } else {
+          assistantMsg.content = cleanedText || null;
+          finishReason = "stop";
+
+          // Cache the state for text reply!
+          if (isStateful && latestConversationId && latestMessageId) {
+            const nextHash = getMessagesHash(messages.concat([assistantMsg]));
+            cacheConversationMapping(nextHash, latestConversationId, latestMessageId, originalToolCalls);
+            console.log(`[Proxy] (Non-stream) Cached stateful response: Hash ${nextHash}, Convo: ${latestConversationId}, Msg: ${latestMessageId}`);
+          }
+        }
       }
+
       // Attach annotations (URL citations from native search) if any
       if (collectedAnnotations.length > 0) {
         // Deduplicate by URL
@@ -1703,7 +2001,7 @@ app.post("/v1/chat/completions", async (req, res) => {
         });
       }
 
-      const outTokens = estimateTokens(cleanedText) + estimateTokens(JSON.stringify(toolCalls || []));
+      const outTokens = estimateTokens(assistantMsg.content || "") + estimateTokens(JSON.stringify(assistantMsg.tool_calls || []));
       req._meter.actualOut = outTokens;
 
       return res.json({
@@ -1715,7 +2013,7 @@ app.post("/v1/chat/completions", async (req, res) => {
           {
             index: 0,
             message: assistantMsg,
-            finish_reason: toolCalls.length > 0 ? "tool_calls" : "stop"
+            finish_reason: finishReason
           }
         ],
         usage: {
