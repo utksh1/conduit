@@ -266,21 +266,38 @@ const openApiSpec = swaggerJSDoc({
             tools: {
               type: "array",
               description:
-                "OpenAI-style function tools. **Prompt-engineered**: the gateway injects a `<tool_call>` protocol system prompt and parses the model's reply back into `tool_calls`. Reliable for simple schemas; flaky for complex / multi-line arguments because the underlying ChatGPT model is not function-call trained.",
+                "Tool definitions. Supports two kinds: **`function`** tools use a prompt-engineered `<tool_call>` protocol (reliable for simple schemas). **`web_search_preview`** triggers ChatGPT's native web search — results come back with URL citation annotations.",
               items: {
-                type: "object",
-                properties: {
-                  type: { type: "string", enum: ["function"] },
-                  function: {
+                oneOf: [
+                  {
                     type: "object",
+                    description: "Prompt-engineered function tool.",
                     properties: {
-                      name: { type: "string" },
-                      description: { type: "string" },
-                      parameters: { type: "object", description: "JSON Schema for the arguments." },
+                      type: { type: "string", enum: ["function"] },
+                      function: {
+                        type: "object",
+                        properties: {
+                          name: { type: "string" },
+                          description: { type: "string" },
+                          parameters: { type: "object", description: "JSON Schema for the arguments." },
+                        },
+                        required: ["name"],
+                      },
                     },
-                    required: ["name"],
                   },
-                },
+                  {
+                    type: "object",
+                    description: "Native web search tool — uses ChatGPT's built-in search. No prompt engineering needed.",
+                    properties: {
+                      type: { type: "string", enum: ["web_search_preview", "web_search"] },
+                      search_context_size: {
+                        type: "string",
+                        enum: ["low", "medium", "high"],
+                        description: "Hint for search depth (accepted for compatibility; not all levels may be honored upstream).",
+                      },
+                    },
+                  },
+                ],
               },
             },
             tool_choice: {
@@ -822,11 +839,17 @@ function repairLooseJson(s) {
   let t = s.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
   // Drop trailing commas before } or ]
   t = t.replace(/,(\s*[}\]])/g, "$1");
+  // Strip JavaScript-style comments (// and /* */)
+  t = t.replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
   // Single-quoted "strings" to double-quoted (only for keys / simple values; risky in general
   // but the model rarely emits real apostrophes inside JSON values).
   if (!t.includes('"') && t.includes("'")) {
     t = t.replace(/'/g, '"');
   }
+  // Attempt to quote unquoted keys:  { foo: "bar" }  →  { "foo": "bar" }
+  t = t.replace(/([{,]\s*)([a-zA-Z_]\w*)\s*:/g, '$1"$2":');
+  // Fix escaped newlines inside string values that should be \\n not literal newline
+  t = t.replace(/(?<=":?\s*"[^"]*)\n/g, "\\n");
   return t;
 }
 
@@ -836,11 +859,25 @@ function tryParseToolCallBody(raw) {
   for (const cand of candidates) {
     try { return JSON.parse(cand); } catch { /* try next */ }
   }
-  // Last-ditch: pull the largest balanced {...} from the candidate.
-  const match = raw.match(/\{[\s\S]*\}/);
-  if (match) {
-    try { return JSON.parse(match[0]); } catch {}
-    try { return JSON.parse(repairLooseJson(match[0])); } catch {}
+  // Try extracting balanced {...} — find the outermost balanced braces
+  const repaired = repairLooseJson(raw);
+  for (const src of [repaired, raw]) {
+    const start = src.indexOf("{");
+    if (start === -1) continue;
+    let depth = 0;
+    let end = -1;
+    for (let i = start; i < src.length; i++) {
+      if (src[i] === "{") depth++;
+      else if (src[i] === "}") {
+        depth--;
+        if (depth === 0) { end = i + 1; break; }
+      }
+    }
+    if (end > start) {
+      const balanced = src.slice(start, end);
+      try { return JSON.parse(balanced); } catch {}
+      try { return JSON.parse(repairLooseJson(balanced)); } catch {}
+    }
   }
   return null;
 }
@@ -939,6 +976,117 @@ function extractToolCalls(text) {
     cleanedText = cleanedText.slice(0, start) + cleanedText.slice(end);
   }
   return { cleanedText: cleanedText.trim(), toolCalls };
+}
+
+/**
+ * Detects whether the caller wants native web search (via `web_search_preview`
+ * or `web_search` tool type). If so, those entries should NOT be injected
+ * into the prompt-engineered tool protocol.
+ */
+function hasNativeSearchTool(tools) {
+  if (!tools || !Array.isArray(tools)) return false;
+  return tools.some(
+    (t) =>
+      t &&
+      (t.type === "web_search_preview" ||
+        t.type === "web_search" ||
+        (t.type === "function" && t.function?.name === "web_search"))
+  );
+}
+
+/**
+ * Filters out native/hosted tool types that the proxy should NOT inject into
+ * the prompt-engineered `<tool_call>` protocol. Returns only function-type
+ * tools meant for prompt engineering.
+ */
+function filterPromptEngineeredTools(tools) {
+  if (!tools || !Array.isArray(tools)) return [];
+  return tools.filter(
+    (t) =>
+      t &&
+      t.type === "function" &&
+      t.function &&
+      t.function.name !== "web_search"
+  );
+}
+
+/**
+ * Extracts OpenAI-compatible annotations (URL citations) from ChatGPT's
+ * native tool messages. The upstream SSE stream carries these in
+ * `message.metadata.cite_metadata` or `message.metadata.search_result_groups`.
+ *
+ * Returns an array of `{ type, url, title, start_index, end_index }` objects.
+ */
+function extractAnnotations(metadata) {
+  const annotations = [];
+  if (!metadata) return annotations;
+
+  // cite_metadata.citations is the most common shape
+  const citations =
+    metadata.cite_metadata?.citations ||
+    metadata.citations ||
+    [];
+  for (const cite of citations) {
+    if (cite.url) {
+      annotations.push({
+        type: "url_citation",
+        url: cite.url,
+        title: cite.title || cite.snippet || "",
+        start_index: cite.start_ix ?? 0,
+        end_index: cite.end_ix ?? 0,
+      });
+    }
+  }
+
+  // search_result_groups is another shape sometimes used
+  const groups = metadata.search_result_groups || [];
+  for (const group of groups) {
+    const entries = group.search_results || group.entries || [];
+    for (const entry of entries) {
+      if (entry.url && !annotations.some((a) => a.url === entry.url)) {
+        annotations.push({
+          type: "url_citation",
+          url: entry.url,
+          title: entry.title || entry.snippet || "",
+          start_index: 0,
+          end_index: 0,
+        });
+      }
+    }
+  }
+
+  return annotations;
+}
+
+/**
+ * Processes a parsed SSE message from the ChatGPT backend and categorizes it.
+ * Returns { type, text, metadata, authorName } where type is one of:
+ *   - 'assistant'  — normal assistant text
+ *   - 'tool'       — native tool output (browser, python, etc.)
+ *   - 'thinking'   — model reasoning/thinking
+ *   - 'system'     — system-level message
+ *   - null         — not a message we care about
+ */
+function categorizeMessage(parsed) {
+  const message = parsed?.message;
+  if (!message || !message.author) return null;
+
+  const role = message.author.role;
+  const authorName = message.author.name || "";
+  const contentParts = message.content?.parts || [];
+  const text = contentParts[0] || "";
+  const metadata = message.metadata || {};
+
+  if (role === "assistant") {
+    return { type: "assistant", text, metadata, authorName };
+  }
+  if (role === "tool") {
+    return { type: "tool", text, metadata, authorName };
+  }
+  if (role === "system") {
+    return { type: "system", text, metadata, authorName };
+  }
+  return null;
 }
 
 /**
@@ -1169,9 +1317,14 @@ app.post("/v1/chat/completions", async (req, res) => {
     });
   }
 
-  const promptText = formatMessages(messages, tools, tool_choice);
-  const hasTools = Array.isArray(tools) && tools.length > 0 && tool_choice !== "none";
-  const requestedModel = enforceThinkingForTools(model || process.env.DEFAULT_MODEL || "auto", hasTools);
+  // Separate native tools (web_search_preview etc.) from prompt-engineered function tools.
+  const wantsNativeSearch = hasNativeSearchTool(tools);
+  const promptEngineeredTools = filterPromptEngineeredTools(tools);
+  const hasPromptTools = promptEngineeredTools.length > 0 && tool_choice !== "none";
+  const promptText = formatMessages(messages, hasPromptTools ? promptEngineeredTools : null, tool_choice);
+  const hasTools = (Array.isArray(tools) && tools.length > 0 && tool_choice !== "none") || wantsNativeSearch;
+  // Only force thinking model for prompt-engineered tools; native search works fine with any model
+  const requestedModel = enforceThinkingForTools(model || process.env.DEFAULT_MODEL || "auto", hasPromptTools);
 
   // Apply per-key model policy.
   let targetModel = requestedModel;
@@ -1320,7 +1473,8 @@ app.post("/v1/chat/completions", async (req, res) => {
 
       let lastText = "";
       let buffer = "";
-      let bufferedFull = ""; // used when hasTools — we can't stream tokens through a tool parser
+      let bufferedFull = ""; // used when hasPromptTools — we can't stream tokens through a tool parser
+      let streamAnnotations = []; // URL citations from native search
 
       for await (const chunk of response.body) {
         buffer += new TextDecoder().decode(chunk);
@@ -1332,7 +1486,7 @@ app.post("/v1/chat/completions", async (req, res) => {
           if (!trimmed) continue;
 
           if (trimmed === "data: [DONE]") {
-            if (hasTools) {
+            if (hasPromptTools) {
               const { cleanedText, toolCalls } = extractToolCalls(bufferedFull);
               const finalModel = upstreamModelSlug || targetModel;
               if (toolCalls.length > 0) {
@@ -1373,12 +1527,22 @@ app.post("/v1/chat/completions", async (req, res) => {
                 })}\n\n`);
               }
             } else {
+              // Emit annotations (from native search) in the final chunk if present
+              const finalDelta = {};
+              if (streamAnnotations.length > 0) {
+                const seen = new Set();
+                finalDelta.annotations = streamAnnotations.filter((a) => {
+                  if (seen.has(a.url)) return false;
+                  seen.add(a.url);
+                  return true;
+                });
+              }
               res.write(`data: ${JSON.stringify({
                 id: completionId,
                 object: "chat.completion.chunk",
                 created: Math.floor(Date.now() / 1000),
-                model: targetModel,
-                choices: [{ index: 0, delta: {}, finish_reason: "stop" }]
+                model: upstreamModelSlug || targetModel,
+                choices: [{ index: 0, delta: finalDelta, finish_reason: "stop" }]
               })}\n\n`);
             }
             res.write("data: [DONE]\n\n");
@@ -1400,17 +1564,24 @@ app.post("/v1/chat/completions", async (req, res) => {
                 parsed?.message?.metadata?.model_slug ||
                 parsed?.message?.metadata?.requested_model_slug ||
                 null;
-              const message = parsed.message;
 
-              if (message && message.author && message.author.role === "assistant") {
-                const currentText = message.content?.parts?.[0] || "";
+              const cat = categorizeMessage(parsed);
+
+              if (cat?.type === "assistant") {
+                const currentText = cat.text || "";
+
+                // Collect annotations from assistant metadata
+                const msgAnnotations = extractAnnotations(cat.metadata);
+                if (msgAnnotations.length > 0) {
+                  streamAnnotations.push(...msgAnnotations);
+                }
 
                 if (currentText && currentText.startsWith(lastText)) {
                   const delta = currentText.slice(lastText.length);
                   lastText = currentText;
 
                   if (delta) {
-                    if (hasTools) {
+                    if (hasPromptTools) {
                       bufferedFull = currentText;
                       // do not forward token deltas while tools may be in flight
                       continue;
@@ -1433,6 +1604,13 @@ app.post("/v1/chat/completions", async (req, res) => {
                     res.write(`data: ${JSON.stringify(chunkPayload)}\n\n`);
                   }
                 }
+              } else if (cat?.type === "tool") {
+                // Native tool output (browser, python, etc.) — capture annotations
+                const toolAnnotations = extractAnnotations(cat.metadata);
+                if (toolAnnotations.length > 0) {
+                  streamAnnotations.push(...toolAnnotations);
+                }
+                console.log(`[Proxy] Stream: native tool message: author=${cat.authorName}, text_len=${String(cat.text).length}`);
               }
             } catch (e) {
               // Ignore lines that are not valid JSON
@@ -1449,6 +1627,8 @@ app.post("/v1/chat/completions", async (req, res) => {
       // 6. Non-Streaming Response Handling
       let fullContent = "";
       let buffer = "";
+      let nativeToolOutputs = []; // Collect native tool messages (browser, python, etc.)
+      let collectedAnnotations = []; // URL citations from native search
 
       for await (const chunk of response.body) {
         buffer += new TextDecoder().decode(chunk);
@@ -1472,8 +1652,28 @@ app.post("/v1/chat/completions", async (req, res) => {
                 parsed?.message?.metadata?.model_slug ||
                 parsed?.message?.metadata?.requested_model_slug ||
                 null;
-              if (parsed.message?.author?.role === "assistant") {
-                fullContent = parsed.message.content?.parts?.[0] || fullContent;
+
+              const cat = categorizeMessage(parsed);
+              if (cat?.type === "assistant") {
+                fullContent = cat.text || fullContent;
+                // Collect annotations from assistant message metadata too
+                const msgAnnotations = extractAnnotations(cat.metadata);
+                if (msgAnnotations.length > 0) {
+                  collectedAnnotations.push(...msgAnnotations);
+                }
+              } else if (cat?.type === "tool") {
+                // Native tool output (browser search, code interpreter, etc.)
+                nativeToolOutputs.push({
+                  authorName: cat.authorName,
+                  text: cat.text,
+                  metadata: cat.metadata,
+                });
+                // Extract citations from tool metadata
+                const toolAnnotations = extractAnnotations(cat.metadata);
+                if (toolAnnotations.length > 0) {
+                  collectedAnnotations.push(...toolAnnotations);
+                }
+                console.log(`[Proxy] Native tool message: author=${cat.authorName}, text_len=${String(cat.text).length}`);
               }
             } catch (e) {
               // Ignore
@@ -1482,7 +1682,8 @@ app.post("/v1/chat/completions", async (req, res) => {
         }
       }
 
-      const { cleanedText, toolCalls } = hasTools
+      // Only run prompt-engineered tool extraction when we have prompt-engineered tools
+      const { cleanedText, toolCalls } = hasPromptTools
         ? extractToolCalls(fullContent)
         : { cleanedText: fullContent, toolCalls: [] };
 
@@ -1490,6 +1691,16 @@ app.post("/v1/chat/completions", async (req, res) => {
       if (toolCalls.length > 0) {
         assistantMsg.tool_calls = toolCalls;
         if (!cleanedText) assistantMsg.content = null;
+      }
+      // Attach annotations (URL citations from native search) if any
+      if (collectedAnnotations.length > 0) {
+        // Deduplicate by URL
+        const seen = new Set();
+        assistantMsg.annotations = collectedAnnotations.filter((a) => {
+          if (seen.has(a.url)) return false;
+          seen.add(a.url);
+          return true;
+        });
       }
 
       const outTokens = estimateTokens(cleanedText) + estimateTokens(JSON.stringify(toolCalls || []));
@@ -1628,18 +1839,26 @@ function responsesToChat(body) {
   flushAssistant();
 
   // Convert Responses-style internally-tagged tools to Chat externally-tagged.
+  // Preserve native tool types (web_search_preview, web_search) alongside function tools.
   let chatTools;
   if (Array.isArray(body.tools) && body.tools.length > 0) {
-    chatTools = body.tools
-      .filter((t) => t && t.type === "function")
-      .map((t) => ({
-        type: "function",
-        function: {
-          name: t.name,
-          description: t.description,
-          parameters: t.parameters,
-        },
-      }));
+    chatTools = [];
+    for (const t of body.tools) {
+      if (!t) continue;
+      if (t.type === "function") {
+        chatTools.push({
+          type: "function",
+          function: {
+            name: t.name,
+            description: t.description,
+            parameters: t.parameters,
+          },
+        });
+      } else if (t.type === "web_search_preview" || t.type === "web_search") {
+        // Pass through native search tool as-is — the inner handler will detect it
+        chatTools.push(t);
+      }
+    }
   }
 
   let toolChoice = body.tool_choice;
@@ -1674,12 +1893,14 @@ function chatToResponses(chatJson, responseId, callIdToToolCallId) {
   };
 
   if (msg.content && typeof msg.content === "string" && msg.content.length > 0) {
+    // Include annotations (URL citations from native search) if present
+    const annotations = Array.isArray(msg.annotations) ? msg.annotations : [];
     output.push({
       id: `msg_${responseId}`,
       type: "message",
       role: "assistant",
       status: "completed",
-      content: [{ type: "output_text", text: msg.content, annotations: [] }],
+      content: [{ type: "output_text", text: msg.content, annotations }],
     });
   }
 
