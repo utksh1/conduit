@@ -1006,6 +1006,25 @@ function extractToolCalls(text) {
     }
   }
 
+  // Pass 3: if still no tool calls found, look for a bare "tool_name(json_arguments)" pattern.
+  if (toolCalls.length === 0) {
+    const fnRe = /([a-zA-Z0-9_\.]+)\s*\(\s*(\{[\s\S]*?\})\s*\)/g;
+    let m;
+    while ((m = fnRe.exec(text)) !== null) {
+      const name = m[1];
+      const body = m[2];
+      const parsed = tryParseToolCallBody(body);
+      if (parsed) {
+        const built = buildToolCall({ name, arguments: parsed }, idx);
+        if (built) {
+          toolCalls.push(built);
+          idx++;
+          spans.push({ start: m.index, end: m.index + m[0].length });
+        }
+      }
+    }
+  }
+
   // Strip recognized spans from cleanedText (in reverse so indices stay valid).
   let cleanedText = text;
   for (const { start, end } of spans.sort((a, b) => b.start - a.start)) {
