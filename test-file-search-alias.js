@@ -3,7 +3,7 @@
 const assert = require("assert");
 const app = require("./server");
 
-const { extractToolCalls, shouldTryEarlyToolExtraction } = app._internals;
+const { extractToolCalls, buildNormalizedToolCall, shouldTryEarlyToolExtraction } = app._internals;
 const allowed = new Set(["glob", "grep", "read", "bash"]);
 
 {
@@ -46,6 +46,31 @@ const allowed = new Set(["glob", "grep", "read", "bash"]);
   assert.strictEqual(toolCalls.length, 1);
   assert.strictEqual(toolCalls[0].function.name, "glob");
   assert.deepStrictEqual(JSON.parse(toolCalls[0].function.arguments), { pattern: "**/*" });
+}
+
+{
+  const tc = buildNormalizedToolCall(
+    "call_direct_file_search",
+    "file_search.msearch",
+    `{"queries":[""],"source_filter":["file_library"],"intent":"nav"}`,
+    allowed
+  );
+  assert.strictEqual(tc.function.name, "glob");
+  assert.deepStrictEqual(JSON.parse(tc.function.arguments), { pattern: "**/*" });
+}
+
+{
+  const tc = buildNormalizedToolCall(
+    "call_direct_file_search_path",
+    "file_search.msearch",
+    { queries: ["*.ts"], path: "/tmp/project" },
+    allowed
+  );
+  assert.strictEqual(tc.function.name, "glob");
+  assert.deepStrictEqual(JSON.parse(tc.function.arguments), {
+    pattern: "*.ts",
+    path: "/tmp/project",
+  });
 }
 
 {

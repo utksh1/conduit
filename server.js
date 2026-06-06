@@ -1102,6 +1102,22 @@ function emitChatToolCalls(safeWrite, completionId, model, toolCalls) {
   })}\n\n`);
 }
 
+function allowedToolNameSet(tools) {
+  return new Set((tools || []).map(t => t.function?.name).filter(Boolean));
+}
+
+function buildNormalizedToolCall(id, name, args, allowedToolNames) {
+  const raw = {
+    id,
+    type: "function",
+    function: {
+      name,
+      arguments: typeof args === "string" ? args : JSON.stringify(args ?? {}),
+    },
+  };
+  return normalizeUnavailableToolCall(raw, allowedToolNames);
+}
+
 function extractToolCalls(text, allowedToolNames) {
   if (!text || typeof text !== "string") return { cleanedText: text || "", toolCalls: [] };
 
@@ -1453,8 +1469,13 @@ async function getAccessToken() {
 // Sentinel PoW Functions
 const DEVICE_ID = uuidv4(); // Persistent device ID for this server instance
 
-async function getChatRequirements(accessToken, cookieHeader) {
-  console.log('[Proxy] Fetching sentinel chat requirements...');
+// ── Sentinel requirements cache ──────────────────────────────────────────────
+// Caches the sentinel token + PoW challenge for a short TTL so rapid back-to-back
+// requests (common in agentic tool loops) skip the extra round-trip.
+let _sentinelCache = null; // { data, expiresAt }
+const SENTINEL_TTL_MS = Number(process.env.SENTINEL_CACHE_TTL_MS) || 25_000; // 25 s default
+
+async function _fetchChatRequirements(accessToken, cookieHeader) {
   const resp = await fetch("https://chatgpt.com/backend-api/sentinel/chat-requirements", {
     method: "POST",
     headers: {
@@ -1475,11 +1496,37 @@ async function getChatRequirements(accessToken, cookieHeader) {
     console.error('[Proxy] Sentinel requirements fetch error', resp.status, errText.slice(0, 800).replace(/\s+/g, ' '));
     throw new Error(`Sentinel requirements fetch failed: ${resp.status}`);
   }
-  const data = await resp.json();
+  return resp.json();
+}
+
+async function getChatRequirements(accessToken, cookieHeader) {
+  // Return cached result if still fresh
+  if (_sentinelCache && Date.now() < _sentinelCache.expiresAt) {
+    console.log('[Proxy] Sentinel requirements (cached)');
+    const data = _sentinelCache.data;
+    // Invalidate cache so the NEXT request will fetch fresh (single-use per token)
+    _sentinelCache = null;
+    // Pre-fetch the next one in the background so it's ready
+    _fetchChatRequirements(accessToken, cookieHeader)
+      .then(d => {
+        _sentinelCache = { data: d, expiresAt: Date.now() + SENTINEL_TTL_MS };
+      })
+      .catch(e => console.warn('[Proxy] Background sentinel pre-fetch failed:', e.message));
+    return data;
+  }
+
+  console.log('[Proxy] Fetching sentinel chat requirements...');
+  const data = await _fetchChatRequirements(accessToken, cookieHeader);
   console.log('[Proxy] Sentinel requirements received:', JSON.stringify({
     token: data.token ? data.token.slice(0, 20) + '...' : null,
     proofofwork: data.proofofwork
   }));
+  // Pre-fetch the next one in the background
+  _fetchChatRequirements(accessToken, cookieHeader)
+    .then(d => {
+      _sentinelCache = { data: d, expiresAt: Date.now() + SENTINEL_TTL_MS };
+    })
+    .catch(e => console.warn('[Proxy] Background sentinel pre-fetch failed:', e.message));
   return data;
 }
 
@@ -1925,17 +1972,30 @@ async function chatCompletionsHandler(req, res) {
 
           if (trimmed === "data: [DONE]") {
             if (activeStreamingToolCall) {
-              safeWrite(`data: ${JSON.stringify({
-                id: completionId,
-                object: "chat.completion.chunk",
-                created: Math.floor(Date.now() / 1000),
-                model: upstreamModelSlug || targetModel,
-                choices: [{
-                  index: 0,
-                  delta: {},
-                  finish_reason: "tool_calls"
-                }]
-              })}\n\n`);
+              if (activeStreamingToolCall.deferred) {
+                const allowedNames = allowedToolNameSet(promptEngineeredTools);
+                const normalized = buildNormalizedToolCall(
+                  activeStreamingToolCall.toolCallId,
+                  activeStreamingToolCall.originalName || activeStreamingToolCall.name,
+                  activeStreamingToolCall.lastArguments || "{}",
+                  allowedNames
+                );
+                if (allowedNames.size === 0 || allowedNames.has(normalized.function.name)) {
+                  emitChatToolCalls(safeWrite, completionId, upstreamModelSlug || targetModel, [normalized]);
+                }
+              } else {
+                safeWrite(`data: ${JSON.stringify({
+                  id: completionId,
+                  object: "chat.completion.chunk",
+                  created: Math.floor(Date.now() / 1000),
+                  model: upstreamModelSlug || targetModel,
+                  choices: [{
+                    index: 0,
+                    delta: {},
+                    finish_reason: "tool_calls"
+                  }]
+                })}\n\n`);
+              }
 
               if (isStateful && latestConversationId && latestMessageId) {
                 const assistantResponse = {
@@ -2046,59 +2106,72 @@ async function chatCompletionsHandler(req, res) {
               if (cat?.type === "assistant") {
                 // Check if it's a client-side tool call
                 if (cat.recipient && cat.recipient !== "all" && !SERVER_TOOLS.has(cat.recipient)) {
+                  const allowedNames = allowedToolNameSet(promptEngineeredTools);
                   const msgId = parsed.message.id;
                   if (!activeStreamingToolCall || activeStreamingToolCall.messageId !== msgId) {
+                    const normalized = buildNormalizedToolCall("call_" + msgId, cat.recipient, cat.text || "{}", allowedNames);
+                    if (allowedNames.size > 0 && !allowedNames.has(normalized.function.name)) {
+                      console.warn(`[Proxy] Dropping recipient tool call '${normalized.function.name}' — not in client's tools list.`);
+                      continue;
+                    }
+                    const deferUntilComplete = cat.recipient !== normalized.function.name;
                     activeStreamingToolCall = {
                       messageId: msgId,
                       toolCallId: "call_" + msgId,
-                      name: cat.recipient,
-                      lastArguments: ""
+                      name: normalized.function.name,
+                      originalName: cat.recipient,
+                      lastArguments: deferUntilComplete ? (cat.text || "") : "",
+                      deferred: deferUntilComplete
                     };
-                    safeWrite(`data: ${JSON.stringify({
-                      id: completionId,
-                      object: "chat.completion.chunk",
-                      created: Math.floor(Date.now() / 1000),
-                      model: upstreamModelSlug || targetModel,
-                      choices: [{
-                        index: 0,
-                        delta: {
-                          role: "assistant",
-                          tool_calls: [{
-                            index: 0,
-                            id: activeStreamingToolCall.toolCallId,
-                            type: "function",
-                            function: {
-                              name: activeStreamingToolCall.name,
-                              arguments: ""
-                            }
-                          }]
-                        },
-                        finish_reason: null
-                      }]
-                    })}\n\n`);
+                    if (!deferUntilComplete) {
+                      safeWrite(`data: ${JSON.stringify({
+                        id: completionId,
+                        object: "chat.completion.chunk",
+                        created: Math.floor(Date.now() / 1000),
+                        model: upstreamModelSlug || targetModel,
+                        choices: [{
+                          index: 0,
+                          delta: {
+                            role: "assistant",
+                            tool_calls: [{
+                              index: 0,
+                              id: activeStreamingToolCall.toolCallId,
+                              type: "function",
+                              function: {
+                                name: activeStreamingToolCall.name,
+                                arguments: ""
+                              }
+                            }]
+                          },
+                          finish_reason: null
+                        }]
+                      })}\n\n`);
+                    }
                   }
 
                   const delta = cat.text.slice(activeStreamingToolCall.lastArguments.length);
                   if (delta) {
                     activeStreamingToolCall.lastArguments = cat.text;
-                    safeWrite(`data: ${JSON.stringify({
-                      id: completionId,
-                      object: "chat.completion.chunk",
-                      created: Math.floor(Date.now() / 1000),
-                      model: upstreamModelSlug || targetModel,
-                      choices: [{
-                        index: 0,
-                        delta: {
-                          tool_calls: [{
-                            index: 0,
-                            function: {
-                              arguments: delta
-                            }
-                          }]
-                        },
-                        finish_reason: null
-                      }]
-                    })}\n\n`);
+                    if (!activeStreamingToolCall.deferred) {
+                      safeWrite(`data: ${JSON.stringify({
+                        id: completionId,
+                        object: "chat.completion.chunk",
+                        created: Math.floor(Date.now() / 1000),
+                        model: upstreamModelSlug || targetModel,
+                        choices: [{
+                          index: 0,
+                          delta: {
+                            tool_calls: [{
+                              index: 0,
+                              function: {
+                                arguments: delta
+                              }
+                            }]
+                          },
+                          finish_reason: null
+                        }]
+                      })}\n\n`);
+                    }
                   }
                   continue; // Skip normal text delta rendering for tool calls
                 }
@@ -2218,18 +2291,20 @@ async function chatCompletionsHandler(req, res) {
                 // Check if it's a client-side tool call
                 if (cat.recipient && cat.recipient !== "all" && !SERVER_TOOLS.has(cat.recipient)) {
                   const toolCallId = "call_" + parsed.message.id;
+                  const allowedNames = allowedToolNameSet(promptEngineeredTools);
+                  const normalized = buildNormalizedToolCall(toolCallId, cat.recipient, cat.text || "{}", allowedNames);
+                  if (allowedNames.size > 0 && !allowedNames.has(normalized.function.name)) {
+                    console.warn(`[Proxy] Dropping recipient tool call '${normalized.function.name}' — not in client's tools list.`);
+                    continue;
+                  }
                   if (!collectedToolCalls.some(tc => tc.id === toolCallId)) {
-                    collectedToolCalls.push({
-                      id: toolCallId,
-                      type: "function",
-                      function: {
-                        name: cat.recipient,
-                        arguments: cat.text
-                      }
-                    });
+                    collectedToolCalls.push(normalized);
                   } else {
                     const tc = collectedToolCalls.find(tc => tc.id === toolCallId);
-                    if (tc) tc.function.arguments = cat.text;
+                    if (tc) {
+                      tc.function.name = normalized.function.name;
+                      tc.function.arguments = normalized.function.arguments;
+                    }
                   }
                 } else {
                   fullContent = cat.text || fullContent;
@@ -2788,6 +2863,7 @@ app._internals = {
   extractToolCalls,
   buildToolSystemPrompt,
   normalizeUnavailableToolCall,
+  buildNormalizedToolCall,
   shouldTryEarlyToolExtraction,
 };
 
