@@ -2634,4 +2634,10 @@ if (require.main === module) {
   });
 }
 
+app._internals = {
+  extractToolCalls,
+  buildToolSystemPrompt,
+  normalizeUnavailableToolCall,
+};
+
 module.exports = app;
