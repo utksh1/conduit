@@ -16,6 +16,15 @@ const {
 // Load environment variables
 dotenv.config();
 
+// ── Global crash guards ─────────────────────────────────────────────────────
+// Prevent the entire server from going down on stray errors / rejections.
+process.on("uncaughtException", (err, origin) => {
+  console.error(`[FATAL] Uncaught exception (${origin}):`, err);
+});
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("[FATAL] Unhandled rejection:", reason);
+});
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -737,6 +746,7 @@ function buildToolSystemPrompt(tools, toolChoice) {
     "Rules:",
     "- One tool call per <tool_call>...</tool_call> block. Multiple blocks per reply are allowed (parallel calls).",
     "- `arguments` MUST be a JSON object literal, not a stringified JSON.",
+    "- Tool names MUST match the Available tools list exactly. Do not use hosted OpenAI tool names such as `file_search.msearch`; use the local file tools listed below.",
     "- No code fences around the block. No `<call>`, `<function_call>`, or other aliases — use `<tool_call>` literally.",
     "- After a tool result arrives (as `<tool_result id=\"...\">...</tool_result>` in a user turn), continue the conversation or emit more tool calls.",
     "- Only emit prose outside `<tool_call>` blocks when you are giving the final answer for this turn.",
@@ -933,7 +943,69 @@ function buildToolCall(parsed, idx) {
   };
 }
 
-function extractToolCalls(text) {
+function parseToolArguments(args) {
+  if (!args || typeof args !== "string") return args && typeof args === "object" ? args : {};
+  try {
+    const parsed = JSON.parse(args);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function stringifyToolArguments(args) {
+  return typeof args === "string" ? args : JSON.stringify(args || {});
+}
+
+function normalizeUnavailableToolCall(toolCall, allowedToolNames) {
+  if (!toolCall || !allowedToolNames || allowedToolNames.has(toolCall.function.name)) return toolCall;
+
+  const name = toolCall.function.name;
+  const args = parseToolArguments(toolCall.function.arguments);
+
+  if (name === "file_search.msearch") {
+    const rawQuery = Array.isArray(args.queries)
+      ? args.queries.find((q) => typeof q === "string" && q.trim())
+      : typeof args.query === "string"
+        ? args.query
+        : "";
+    const query = (rawQuery || "").trim();
+    const path = args.path || args.directory || args.cwd;
+
+    if (allowedToolNames.has("glob")) {
+      const looksLikeGlob = /[*?[\]{}]/.test(query);
+      const asksForListing = !query || /\b(list|show|all files?|files|filenames?|directory|tree)\b/i.test(query);
+      const pattern = looksLikeGlob ? query : asksForListing ? "**/*" : `**/*${query.replace(/\s+/g, "*")}*`;
+      return {
+        ...toolCall,
+        function: {
+          name: "glob",
+          arguments: stringifyToolArguments({
+            pattern,
+            ...(path ? { path } : {}),
+          }),
+        },
+      };
+    }
+
+    if (allowedToolNames.has("grep") && query) {
+      return {
+        ...toolCall,
+        function: {
+          name: "grep",
+          arguments: stringifyToolArguments({
+            pattern: query,
+            ...(path ? { path } : {}),
+          }),
+        },
+      };
+    }
+  }
+
+  return toolCall;
+}
+
+function extractToolCalls(text, allowedToolNames) {
   if (!text || typeof text !== "string") return { cleanedText: text || "", toolCalls: [] };
 
   const toolCalls = [];
@@ -981,8 +1053,14 @@ function extractToolCalls(text) {
 
     const body = text.slice(bodyStart, bodyEnd).trim();
     const parsed = tryParseToolCallBody(body);
-    const built = buildToolCall(parsed, idx);
+    const built = normalizeUnavailableToolCall(buildToolCall(parsed, idx), allowedToolNames);
     if (built) {
+      if (allowedToolNames && !allowedToolNames.has(built.function.name)) {
+        // Model hallucinated a tool name not in the client's registry — skip it.
+        console.warn(`[Proxy] Dropping tool call '${built.function.name}' — not in client's tools list.`);
+        cursor = blockEnd;
+        continue;
+      }
       toolCalls.push(built);
       idx++;
       spans.push({ start: bestOpenAt, end: blockEnd });
@@ -997,8 +1075,12 @@ function extractToolCalls(text) {
     let m;
     while ((m = fenceRe.exec(text)) !== null) {
       const parsed = tryParseToolCallBody(m[1]);
-      const built = buildToolCall(parsed, idx);
+      const built = normalizeUnavailableToolCall(buildToolCall(parsed, idx), allowedToolNames);
       if (built) {
+        if (allowedToolNames && !allowedToolNames.has(built.function.name)) {
+          console.warn(`[Proxy] Dropping fenced tool call '${built.function.name}' — not in client's tools list.`);
+          continue;
+        }
         toolCalls.push(built);
         idx++;
         spans.push({ start: m.index, end: m.index + m[0].length });
@@ -1016,8 +1098,13 @@ function extractToolCalls(text) {
       const parsed = tryParseToolCallBody(body);
       if (parsed) {
         const built = buildToolCall({ name, arguments: parsed }, idx);
-        if (built) {
-          toolCalls.push(built);
+        const normalized = normalizeUnavailableToolCall(built, allowedToolNames);
+        if (normalized) {
+          if (allowedToolNames && !allowedToolNames.has(normalized.function.name)) {
+            console.warn(`[Proxy] Dropping bare fn call '${normalized.function.name}' — not in client's tools list.`);
+            continue;
+          }
+          toolCalls.push(normalized);
           idx++;
           spans.push({ start: m.index, end: m.index + m[0].length });
         }
@@ -1032,7 +1119,8 @@ function extractToolCalls(text) {
       "p", "div", "span", "code", "pre", "a", "h1", "h2", "h3", "h4", "h5", "h6",
       "ul", "ol", "li", "html", "body", "head", "style", "script", "table", "tr",
       "td", "th", "thead", "tbody", "em", "strong", "b", "i", "u", "br", "hr", "img",
-      "input", "button", "select", "option", "textarea", "form", "label", "meta", "link"
+      "input", "button", "select", "option", "textarea", "form", "label", "meta", "link",
+      "tool_call", "function_call", "call", "tool", "tool_result"
     ]);
     let m;
     while ((m = customTagRe.exec(text)) !== null) {
@@ -1042,8 +1130,13 @@ function extractToolCalls(text) {
       const parsed = tryParseToolCallBody(body);
       if (parsed) {
         const built = buildToolCall({ name, arguments: parsed }, idx);
-        if (built) {
-          toolCalls.push(built);
+        const normalized = normalizeUnavailableToolCall(built, allowedToolNames);
+        if (normalized) {
+          if (allowedToolNames && !allowedToolNames.has(normalized.function.name)) {
+            console.warn(`[Proxy] Dropping custom-tag tool call '${normalized.function.name}' — not in client's tools list.`);
+            continue;
+          }
+          toolCalls.push(normalized);
           idx++;
           spans.push({ start: m.index, end: m.index + m[0].length });
         }
@@ -1639,6 +1732,26 @@ app.post("/v1/chat/completions", async (req, res) => {
       res.setHeader("Cache-Control", "no-cache");
       res.setHeader("Connection", "keep-alive");
 
+      // ── Client disconnect guard ────────────────────────────────────────
+      let clientDisconnected = false;
+      res.on("close", () => {
+        clientDisconnected = true;
+        console.log(`[Proxy] Client disconnected during stream (${completionId})`);
+      });
+
+      /** Write to the SSE stream, swallowing errors if the socket is already gone. */
+      const safeWrite = (data) => {
+        if (clientDisconnected) return false;
+        try {
+          res.write(data);
+          return true;
+        } catch (writeErr) {
+          console.warn(`[Proxy] SSE write failed (${completionId}):`, writeErr.message);
+          clientDisconnected = true;
+          return false;
+        }
+      };
+
       let lastText = "";
       let buffer = "";
       let bufferedFull = ""; // used when hasPromptTools — we can't stream tokens through a tool parser
@@ -1647,7 +1760,9 @@ app.post("/v1/chat/completions", async (req, res) => {
       let latestMessageId = null;
       let latestConversationId = null;
 
+      try {
       for await (const chunk of response.body) {
+        if (clientDisconnected) break;
         buffer += new TextDecoder().decode(chunk);
         const lines = buffer.split("\n");
         buffer = lines.pop(); // Hold remaining incomplete line
@@ -1658,7 +1773,7 @@ app.post("/v1/chat/completions", async (req, res) => {
 
           if (trimmed === "data: [DONE]") {
             if (activeStreamingToolCall) {
-              res.write(`data: ${JSON.stringify({
+              safeWrite(`data: ${JSON.stringify({
                 id: completionId,
                 object: "chat.completion.chunk",
                 created: Math.floor(Date.now() / 1000),
@@ -1696,10 +1811,11 @@ app.post("/v1/chat/completions", async (req, res) => {
               }
               activeStreamingToolCall = null;
             } else if (hasPromptTools) {
-              const { cleanedText, toolCalls } = extractToolCalls(bufferedFull);
+              const allowedNames = new Set(promptEngineeredTools.map(t => t.function?.name).filter(Boolean));
+              const { cleanedText, toolCalls } = extractToolCalls(bufferedFull, allowedNames);
               const finalModel = upstreamModelSlug || targetModel;
               if (toolCalls.length > 0) {
-                res.write(`data: ${JSON.stringify({
+                safeWrite(`data: ${JSON.stringify({
                   id: completionId,
                   object: "chat.completion.chunk",
                   created: Math.floor(Date.now() / 1000),
@@ -1710,7 +1826,7 @@ app.post("/v1/chat/completions", async (req, res) => {
                     finish_reason: null
                   }]
                 })}\n\n`);
-                res.write(`data: ${JSON.stringify({
+                safeWrite(`data: ${JSON.stringify({
                   id: completionId,
                   object: "chat.completion.chunk",
                   created: Math.floor(Date.now() / 1000),
@@ -1719,7 +1835,7 @@ app.post("/v1/chat/completions", async (req, res) => {
                 })}\n\n`);
               } else {
                 if (cleanedText) {
-                  res.write(`data: ${JSON.stringify({
+                  safeWrite(`data: ${JSON.stringify({
                     id: completionId,
                     object: "chat.completion.chunk",
                     created: Math.floor(Date.now() / 1000),
@@ -1727,7 +1843,7 @@ app.post("/v1/chat/completions", async (req, res) => {
                     choices: [{ index: 0, delta: { content: cleanedText }, finish_reason: null }]
                   })}\n\n`);
                 }
-                res.write(`data: ${JSON.stringify({
+                safeWrite(`data: ${JSON.stringify({
                   id: completionId,
                   object: "chat.completion.chunk",
                   created: Math.floor(Date.now() / 1000),
@@ -1746,7 +1862,7 @@ app.post("/v1/chat/completions", async (req, res) => {
                   return true;
                 });
               }
-              res.write(`data: ${JSON.stringify({
+              safeWrite(`data: ${JSON.stringify({
                 id: completionId,
                 object: "chat.completion.chunk",
                 created: Math.floor(Date.now() / 1000),
@@ -1764,9 +1880,10 @@ app.post("/v1/chat/completions", async (req, res) => {
                 console.log(`[Proxy] Cached stateful response: Hash ${nextHash}, Convo: ${latestConversationId}, Msg: ${latestMessageId}`);
               }
             }
-            res.write("data: [DONE]\n\n");
+            safeWrite("data: [DONE]\n\n");
             req._meter.actualOut = estimateTokens(lastText);
-            return res.end();
+            if (!clientDisconnected) res.end();
+            return;
           }
 
           if (trimmed.startsWith("data: ")) {
@@ -1802,7 +1919,7 @@ app.post("/v1/chat/completions", async (req, res) => {
                       name: cat.recipient,
                       lastArguments: ""
                     };
-                    res.write(`data: ${JSON.stringify({
+                    safeWrite(`data: ${JSON.stringify({
                       id: completionId,
                       object: "chat.completion.chunk",
                       created: Math.floor(Date.now() / 1000),
@@ -1829,7 +1946,7 @@ app.post("/v1/chat/completions", async (req, res) => {
                   const delta = cat.text.slice(activeStreamingToolCall.lastArguments.length);
                   if (delta) {
                     activeStreamingToolCall.lastArguments = cat.text;
-                    res.write(`data: ${JSON.stringify({
+                    safeWrite(`data: ${JSON.stringify({
                       id: completionId,
                       object: "chat.completion.chunk",
                       created: Math.floor(Date.now() / 1000),
@@ -1884,7 +2001,7 @@ app.post("/v1/chat/completions", async (req, res) => {
                         }
                       ]
                     };
-                    res.write(`data: ${JSON.stringify(chunkPayload)}\n\n`);
+                    safeWrite(`data: ${JSON.stringify(chunkPayload)}\n\n`);
                   }
                 }
               } else if (cat?.type === "tool") {
@@ -1901,11 +2018,16 @@ app.post("/v1/chat/completions", async (req, res) => {
           }
         }
       }
+      } catch (streamErr) {
+        // Upstream read error (e.g. ECONNRESET from ChatGPT) — log and close gracefully.
+        console.error(`[Proxy] SSE stream read error (${completionId}):`, streamErr.message);
+      }
 
-      // Finish cleanly if loop ends
-      res.write("data: [DONE]\n\n");
+      // Finish cleanly if loop ends (or errored out)
+      safeWrite("data: [DONE]\n\n");
       req._meter.actualOut = estimateTokens(lastText);
-      return res.end();
+      if (!clientDisconnected) res.end();
+      return;
     } else {
       // 6. Non-Streaming Response Handling
       let fullContent = "";
@@ -2014,8 +2136,9 @@ app.post("/v1/chat/completions", async (req, res) => {
         }
       } else {
         // Only run prompt-engineered tool extraction when we have prompt-engineered tools
+        const allowedNames = new Set(promptEngineeredTools.map(t => t.function?.name).filter(Boolean));
         const { cleanedText, toolCalls } = hasPromptTools
-          ? extractToolCalls(fullContent)
+          ? extractToolCalls(fullContent, allowedNames)
           : { cleanedText: fullContent, toolCalls: [] };
 
         if (toolCalls.length > 0) {
