@@ -1412,8 +1412,34 @@ app.get("/ping", (req, res) => {
   res.json({ status: "ok", time: new Date().toISOString() });
 });
 
+app.get("/", (req, res) => {
+  res.json({
+    status: "ok",
+    name: "chatgpt-to-api",
+    api_base: "/v1",
+    endpoints: {
+      models: "/v1/models",
+      chat_completions: "/v1/chat/completions",
+      responses: "/v1/responses",
+      docs: "/docs",
+    },
+  });
+});
+
+app.get("/v1", (req, res) => {
+  res.json({
+    status: "ok",
+    api_base: "/v1",
+    endpoints: {
+      models: "/v1/models",
+      chat_completions: "/v1/chat/completions",
+      responses: "/v1/responses",
+    },
+  });
+});
+
 // Models Endpoint (for OpenAI client compatibility)
-app.get("/v1/models", async (req, res) => {
+async function modelsHandler(req, res) {
   let models = SUPPORTED_MODELS;
   try {
     const auth = await authenticateRequest(req);
@@ -1436,10 +1462,13 @@ app.get("/v1/models", async (req, res) => {
       owned_by: "openai",
     })),
   });
-});
+}
+
+app.get("/v1/models", modelsHandler);
+app.get("/models", modelsHandler);
 
 // Chat Completions Endpoint
-app.post("/v1/chat/completions", async (req, res) => {
+async function chatCompletionsHandler(req, res) {
   installMeterHook(req, res);
 
   // 1. Authenticate Request
@@ -2209,7 +2238,10 @@ app.post("/v1/chat/completions", async (req, res) => {
     }
     res.end();
   }
-});
+}
+
+app.post("/v1/chat/completions", chatCompletionsHandler);
+app.post("/chat/completions", chatCompletionsHandler);
 
 // =============================================================================
 // /v1/responses — OpenAI Responses API bridge
