@@ -48,4 +48,16 @@ const allowed = new Set(["glob", "grep", "read", "bash"]);
   assert.deepStrictEqual(JSON.parse(toolCalls[0].function.arguments), { pattern: "**/*" });
 }
 
+{
+  const text = `I’ll list the workspace files from /Users/Utkarsh/Desktop/Projects/SecuScan and return the paths clearly.`;
+  const { cleanedText, toolCalls } = extractToolCalls(text, allowed);
+  assert.strictEqual(cleanedText, "");
+  assert.strictEqual(toolCalls.length, 1);
+  assert.strictEqual(toolCalls[0].function.name, "glob");
+  assert.deepStrictEqual(JSON.parse(toolCalls[0].function.arguments), {
+    pattern: "**/*",
+    path: "/Users/Utkarsh/Desktop/Projects/SecuScan",
+  });
+}
+
 console.log("file_search.msearch alias tests passed");

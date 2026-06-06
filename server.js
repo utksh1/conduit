@@ -747,6 +747,7 @@ function buildToolSystemPrompt(tools, toolChoice) {
     "- One tool call per <tool_call>...</tool_call> block. Multiple blocks per reply are allowed (parallel calls).",
     "- `arguments` MUST be a JSON object literal, not a stringified JSON.",
     "- Tool names MUST match the Available tools list exactly. Do not use hosted OpenAI tool names such as `file_search.msearch`; use the local file tools listed below.",
+    "- When the user asks to list, inspect, search, or read files, call an available file tool immediately. Do not reply with prose such as \"I'll list the files\" without a tool call.",
     "- No code fences around the block. No `<call>`, `<function_call>`, or other aliases — use `<tool_call>` literally.",
     "- After a tool result arrives (as `<tool_result id=\"...\">...</tool_result>` in a user turn), continue the conversation or emit more tool calls.",
     "- Only emit prose outside `<tool_call>` blocks when you are giving the final answer for this turn.",
@@ -1008,6 +1009,30 @@ function normalizeUnavailableToolCall(toolCall, allowedToolNames) {
   return toolCall;
 }
 
+function inferProseFileToolCall(text, idx, allowedToolNames) {
+  if (!text || !allowedToolNames || !allowedToolNames.has("glob")) return null;
+
+  const saysWillList =
+    /\b(?:i\s*(?:will|'ll|’ll)|i\s+am\s+going\s+to|i'm\s+going\s+to|let\s+me)\s+(?:now\s+)?(?:list|show|inspect|scan|find)\b/i.test(text);
+  const fileIntent = /\b(?:all\s+files|workspace\s+files|files?|file\s+paths?|directory|directories|tree)\b/i.test(text);
+  if (!saysWillList || !fileIntent) return null;
+
+  const pathMatch = text.match(/\bfrom\s+((?:\/|~\/)[^\s,;!?)\]}"'`<>]+)/i);
+  const path = pathMatch ? pathMatch[1].replace(/[.:]+$/g, "") : undefined;
+
+  return {
+    id: `call_${Date.now().toString(36)}_${idx}`,
+    type: "function",
+    function: {
+      name: "glob",
+      arguments: stringifyToolArguments({
+        pattern: "**/*",
+        ...(path ? { path } : {}),
+      }),
+    },
+  };
+}
+
 function extractToolCalls(text, allowedToolNames) {
   if (!text || typeof text !== "string") return { cleanedText: text || "", toolCalls: [] };
 
@@ -1160,6 +1185,16 @@ function extractToolCalls(text, allowedToolNames) {
           spans.push({ start: m.index, end: m.index + m[0].length });
         }
       }
+    }
+  }
+
+  // Pass 6: final narrow fallback for prose-only "I'll list files from /path"
+  // responses. This repairs a common no-op agent turn without guessing broadly.
+  if (toolCalls.length === 0) {
+    const built = inferProseFileToolCall(text, idx, allowedToolNames);
+    if (built) {
+      toolCalls.push(built);
+      spans.push({ start: 0, end: text.length });
     }
   }
 
