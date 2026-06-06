@@ -3,7 +3,7 @@
 const assert = require("assert");
 const app = require("./server");
 
-const { extractToolCalls } = app._internals;
+const { extractToolCalls, shouldTryEarlyToolExtraction } = app._internals;
 const allowed = new Set(["glob", "grep", "read", "bash"]);
 
 {
@@ -78,6 +78,17 @@ const allowed = new Set(["glob", "grep", "read", "bash"]);
   assert.strictEqual(toolCalls.length, 1);
   assert.strictEqual(toolCalls[0].function.name, "bash");
   assert.deepStrictEqual(JSON.parse(toolCalls[0].function.arguments), { command: "pwd" });
+}
+
+{
+  assert.strictEqual(
+    shouldTryEarlyToolExtraction(`<tool_call>{"name":"bash","arguments":{"command":"pwd"}}</tool_call>`),
+    true
+  );
+  assert.strictEqual(
+    shouldTryEarlyToolExtraction(`I’ll list the workspace files from /tmp and return the paths clearly.`),
+    false
+  );
 }
 
 console.log("file_search.msearch alias tests passed");

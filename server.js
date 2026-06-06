@@ -1070,6 +1070,38 @@ function inferProseFileToolCall(text, idx, allowedToolNames) {
   };
 }
 
+function shouldTryEarlyToolExtraction(text) {
+  const t = (text || "").trim();
+  if (!t) return false;
+  if (/<\/(?:tool_call|function_call|call|tool)>/i.test(t)) return true;
+  if (/```/.test(t) && /```\s*$/i.test(t)) return true;
+  if (/^\{[\s\S]*\}$/.test(t) && /"(?:name|function|tool|tool_name|queries)"\s*:/.test(t)) return true;
+  if (/^[a-zA-Z0-9_.]+\s*\(\s*\{[\s\S]*\}\s*\)\s*$/.test(t)) return true;
+  if (/<([a-zA-Z0-9_.-]+)>[\s\S]*<\/\1>\s*$/i.test(t)) return true;
+  return false;
+}
+
+function emitChatToolCalls(safeWrite, completionId, model, toolCalls) {
+  safeWrite(`data: ${JSON.stringify({
+    id: completionId,
+    object: "chat.completion.chunk",
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [{
+      index: 0,
+      delta: { role: "assistant", tool_calls: toolCalls.map((tc, i) => ({ index: i, ...tc })) },
+      finish_reason: null
+    }]
+  })}\n\n`);
+  safeWrite(`data: ${JSON.stringify({
+    id: completionId,
+    object: "chat.completion.chunk",
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }]
+  })}\n\n`);
+}
+
 function extractToolCalls(text, allowedToolNames) {
   if (!text || typeof text !== "string") return { cleanedText: text || "", toolCalls: [] };
 
@@ -1935,24 +1967,7 @@ async function chatCompletionsHandler(req, res) {
               const { cleanedText, toolCalls } = extractToolCalls(bufferedFull, allowedNames);
               const finalModel = upstreamModelSlug || targetModel;
               if (toolCalls.length > 0) {
-                safeWrite(`data: ${JSON.stringify({
-                  id: completionId,
-                  object: "chat.completion.chunk",
-                  created: Math.floor(Date.now() / 1000),
-                  model: finalModel,
-                  choices: [{
-                    index: 0,
-                    delta: { role: "assistant", tool_calls: toolCalls.map((tc, i) => ({ index: i, ...tc })) },
-                    finish_reason: null
-                  }]
-                })}\n\n`);
-                safeWrite(`data: ${JSON.stringify({
-                  id: completionId,
-                  object: "chat.completion.chunk",
-                  created: Math.floor(Date.now() / 1000),
-                  model: finalModel,
-                  choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }]
-                })}\n\n`);
+                emitChatToolCalls(safeWrite, completionId, finalModel, toolCalls);
               } else {
                 if (cleanedText) {
                   safeWrite(`data: ${JSON.stringify({
@@ -2103,6 +2118,18 @@ async function chatCompletionsHandler(req, res) {
                   if (delta) {
                     if (hasPromptTools) {
                       bufferedFull = currentText;
+                      if (shouldTryEarlyToolExtraction(bufferedFull)) {
+                        const allowedNames = new Set(promptEngineeredTools.map(t => t.function?.name).filter(Boolean));
+                        const { toolCalls } = extractToolCalls(bufferedFull, allowedNames);
+                        if (toolCalls.length > 0) {
+                          const finalModel = upstreamModelSlug || targetModel;
+                          emitChatToolCalls(safeWrite, completionId, finalModel, toolCalls);
+                          safeWrite("data: [DONE]\n\n");
+                          req._meter.actualOut = estimateTokens(JSON.stringify(toolCalls));
+                          if (!clientDisconnected) res.end();
+                          return;
+                        }
+                      }
                       // do not forward token deltas while tools may be in flight
                       continue;
                     }
@@ -2761,6 +2788,7 @@ app._internals = {
   extractToolCalls,
   buildToolSystemPrompt,
   normalizeUnavailableToolCall,
+  shouldTryEarlyToolExtraction,
 };
 
 module.exports = app;
