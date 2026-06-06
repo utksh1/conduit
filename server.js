@@ -1025,6 +1025,32 @@ function extractToolCalls(text) {
     }
   }
 
+  // Pass 4: if still no tool calls found, look for custom-named XML tags like <tool_name>json_arguments</tool_name>.
+  if (toolCalls.length === 0) {
+    const customTagRe = /<([a-zA-Z0-9_\-\.]+)>([\s\S]*?)<\/(\1)>/g;
+    const IGNORED_TAGS = new Set([
+      "p", "div", "span", "code", "pre", "a", "h1", "h2", "h3", "h4", "h5", "h6",
+      "ul", "ol", "li", "html", "body", "head", "style", "script", "table", "tr",
+      "td", "th", "thead", "tbody", "em", "strong", "b", "i", "u", "br", "hr", "img",
+      "input", "button", "select", "option", "textarea", "form", "label", "meta", "link"
+    ]);
+    let m;
+    while ((m = customTagRe.exec(text)) !== null) {
+      const name = m[1];
+      if (IGNORED_TAGS.has(name.toLowerCase())) continue;
+      const body = m[2];
+      const parsed = tryParseToolCallBody(body);
+      if (parsed) {
+        const built = buildToolCall({ name, arguments: parsed }, idx);
+        if (built) {
+          toolCalls.push(built);
+          idx++;
+          spans.push({ start: m.index, end: m.index + m[0].length });
+        }
+      }
+    }
+  }
+
   // Strip recognized spans from cleanedText (in reverse so indices stay valid).
   let cleanedText = text;
   for (const { start, end } of spans.sort((a, b) => b.start - a.start)) {
