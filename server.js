@@ -1431,7 +1431,7 @@ app.post("/v1/chat/completions", async (req, res) => {
   const prefix = messages.slice(0, N);
   const prefixHash = getMessagesHash(prefix);
 
-  if (statefulEnabled) {
+  if (statefulEnabled && !hasPromptTools) {
     const cached = conversationCache.get(prefixHash);
     if (cached) {
       isStateful = true;
