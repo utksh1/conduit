@@ -85,8 +85,8 @@ PROXY_API_KEY=
 # Default model id to send upstream when client omits it
 DEFAULT_MODEL=auto
 
-# Auto-upgrade standard models to thinking variants when tools are present (default: true)
-TOOL_FORCE_THINKING=true
+# Auto-upgrade standard models to thinking variants when tools are present (default: false)
+TOOL_FORCE_THINKING=false
 ```
 
 ### 3. Start the Server

@@ -15,7 +15,9 @@ services:
       - key: PORT
         value: "10000"
       - key: DEFAULT_MODEL
-        value: gpt-5.5-thinking
+        value: gpt-5-5-instant
+      - key: TOOL_FORCE_THINKING
+        value: "false"
       - key: PROXY_API_KEY
         sync: false
       - key: CHATGPT_ACCESS_TOKEN

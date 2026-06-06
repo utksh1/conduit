@@ -746,7 +746,8 @@ function buildToolSystemPrompt(tools, toolChoice) {
     "Rules:",
     "- One tool call per <tool_call>...</tool_call> block. Multiple blocks per reply are allowed (parallel calls).",
     "- `arguments` MUST be a JSON object literal, not a stringified JSON.",
-    "- Tool names MUST match the Available tools list exactly. Do not use hosted OpenAI tool names such as `file_search.msearch`; use the local file tools listed below.",
+    "- Tool names MUST match the Available tools list exactly. Do not use hosted/internal tool names such as `file_search.msearch`, `container.exec`, or `functions.exec_command`; use the local tools listed below.",
+    "- When you need to run a shell command and `bash` is available, call `bash` with a `command` argument. Do not call `container.exec`.",
     "- When the user asks to list, inspect, search, or read files, call an available file tool immediately. Do not reply with prose such as \"I'll list the files\" without a tool call.",
     "- No code fences around the block. No `<call>`, `<function_call>`, or other aliases — use `<tool_call>` literally.",
     "- After a tool result arrives (as `<tool_result id=\"...\">...</tool_result>` in a user turn), continue the conversation or emit more tool calls.",
@@ -850,14 +851,12 @@ function formatMessages(messages, tools, toolChoice) {
 /**
  * When the client sends a tools[] array, instant models drift out of the
  * <tool_call> format on long agentic loops. Thinking variants plan in CoT
- * before emitting, so they hold the protocol much better. This upgrades
- * the model selection when tools are present and the caller didn't ask for
- * a specific thinking/reasoning model already. Disable with
- * TOOL_FORCE_THINKING=false in env.
+ * before emitting, so they hold the protocol better, but they are slower for
+ * agent loops. Opt into automatic upgrades with TOOL_FORCE_THINKING=true.
  */
 function enforceThinkingForTools(requestedModel, hasTools) {
   if (!hasTools) return requestedModel;
-  if (process.env.TOOL_FORCE_THINKING === "false") return requestedModel;
+  if (process.env.TOOL_FORCE_THINKING !== "true") return requestedModel;
   const m = (requestedModel || "").toLowerCase();
   // Already a thinking/reasoning model — leave it alone.
   if (m.includes("thinking") || m.includes("reasoning") || m === "o3" || m === "o4" || m.startsWith("o1")) {
@@ -961,11 +960,49 @@ function stringifyToolArguments(args) {
   return typeof args === "string" ? args : JSON.stringify(args || {});
 }
 
+function shellQuote(value) {
+  const s = String(value || "");
+  if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(s)) return s;
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+function commandArrayToString(parts) {
+  return parts.map((part) => shellQuote(part)).join(" ");
+}
+
 function normalizeUnavailableToolCall(toolCall, allowedToolNames) {
   if (!toolCall || !allowedToolNames || allowedToolNames.has(toolCall.function.name)) return toolCall;
 
   const name = toolCall.function.name;
   const args = parseToolArguments(toolCall.function.arguments);
+
+  if (
+    ["container.exec", "functions.exec_command", "exec_command", "shell"].includes(name) &&
+    allowedToolNames.has("bash")
+  ) {
+    const rawCommand =
+      args.command ??
+      args.cmd ??
+      args.commands ??
+      args.input ??
+      args.script ??
+      "";
+    const command = Array.isArray(rawCommand)
+      ? commandArrayToString(rawCommand)
+      : String(rawCommand || "");
+    const workdir = args.workdir || args.cwd;
+    const fullCommand = workdir && command
+      ? `cd ${shellQuote(workdir)} && ${command}`
+      : command;
+
+    return {
+      ...toolCall,
+      function: {
+        name: "bash",
+        arguments: stringifyToolArguments({ command: fullCommand }),
+      },
+    };
+  }
 
   if (name === "file_search.msearch") {
     const rawQuery = Array.isArray(args.queries)

@@ -60,4 +60,24 @@ const allowed = new Set(["glob", "grep", "read", "bash"]);
   });
 }
 
+{
+  const text = `<tool_call>{"name":"container.exec","arguments":{"cmd":"ls -la","workdir":"/Users/Utkarsh/Desktop/Projects/SecuScan"}}</tool_call>`;
+  const { cleanedText, toolCalls } = extractToolCalls(text, allowed);
+  assert.strictEqual(cleanedText, "");
+  assert.strictEqual(toolCalls.length, 1);
+  assert.strictEqual(toolCalls[0].function.name, "bash");
+  assert.deepStrictEqual(JSON.parse(toolCalls[0].function.arguments), {
+    command: "cd /Users/Utkarsh/Desktop/Projects/SecuScan && ls -la",
+  });
+}
+
+{
+  const text = `functions.exec_command({"cmd":"pwd"})`;
+  const { cleanedText, toolCalls } = extractToolCalls(text, allowed);
+  assert.strictEqual(cleanedText, "");
+  assert.strictEqual(toolCalls.length, 1);
+  assert.strictEqual(toolCalls[0].function.name, "bash");
+  assert.deepStrictEqual(JSON.parse(toolCalls[0].function.arguments), { command: "pwd" });
+}
+
 console.log("file_search.msearch alias tests passed");
