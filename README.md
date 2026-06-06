@@ -1,192 +1,148 @@
 # Unofficial ChatGPT-to-OpenAI API Gateway
 
-This is a lightweight, zero-dependency Node.js Express server that acts as a local proxy. It allows you to use your web-based ChatGPT account as a standard OpenAI-compatible API endpoint inside any client or library (e.g. IDE extensions like Cursor/Continue, frontends like LobeChat, or custom scripts).
+[![Status](https://img.shields.io/badge/status-active-success.svg)](#)
+[![Node](https://img.shields.io/badge/node-%3E%3D%2018.0.0-blue.svg)](#)
+[![Zero Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen.svg)](#)
 
-## How It Works
+A lightweight, zero-dependency Node.js Express server that acts as a local or remote proxy. It allows you to use your web-based ChatGPT account as a standard OpenAI-compatible API endpoint inside any client or library (e.g. IDE extensions like **Cursor/Continue/Kilo Code**, frontends like **LobeChat**, or custom scripts).
 
-1. **Session Wrapping**: The proxy logs into your web account using your long-lived `__Secure-next-auth.session-token` browser cookie and automatically fetches/refreshes the short-lived `accessToken` on the fly.
-2. **Translation**: It translates stateless `/v1/chat/completions` requests into the single-node conversation format expected by `chatgpt.com/backend-api/conversation`.
-3. **SSE Delta Extraction**: It converts ChatGPT's accumulated-stream chunks into standard OpenAI chunk deltas so text displays beautifully in real-time.
+The gateway automatically handles session-token auto-refreshing, solves upstream **Sentinel Proof-of-Work (PoW)** challenges locally, and translates stateful conversation threads and client-side tool calling formats.
 
-## Sentinel Proof-of-Work (PoW)
+---
 
-ChatGPT Web can require a “Sentinel” Proof-of-Work challenge before it will accept conversation requests.
+## ✨ Features
 
-This proxy:
+- **🔄 Automatic Token Refresh**: Logs into your web account using your long-lived `__Secure-next-auth.session-token` browser cookie and automatically fetches/refreshes the short-lived `accessToken` on the fly.
+- **⚡ Sentinel PoW Solver**: Solves ChatGPT Web's SHA3-512-based Sentinel Proof-of-Work challenge locally in `0–5ms` to avoid `403 Forbidden` errors.
+- **🧠 Stateful Conversation Mapping**: Translates stateless OpenAI message histories into stateful ChatGPT conversation threads via SHA-256 message fingerprinting.
+- **🛠️ Client-Side Tool Calling (Agent Mode)**: Intercepts and parses custom tools requested by agentic clients (like Kilo Code) and forwards them seamlessly.
+- **🧩 Multi-Format Tool Extraction**: Uses a 4-pass parser to extract tool calls from model outputs in multiple formats (XML tags, bare fenced JSON, bare function calls, and custom-named XML tags).
+- **📡 Server-Sent Events (SSE)**: Converts ChatGPT's accumulated-stream chunks into standard real-time OpenAI chunk deltas.
+- **🎨 Premium UI Dashboard**: Served on the root `/` route for interactive prompting, model switching, and real-time latency/model tracking.
 
-1. Calls `POST https://chatgpt.com/backend-api/sentinel/chat-requirements` to fetch the PoW challenge.
-2. Solves the SHA3-512-based nonce puzzle locally.
-3. Sends the solution via the `Openai-Sentinel-Proof-Token` header when calling `POST https://chatgpt.com/backend-api/conversation`.
+---
 
-## Model Routing Reality Check
+## 🏗️ How It Works
 
-This proxy exposes an OpenAI-compatible API surface, but it routes to ChatGPT Web (`chatgpt.com/backend-api/conversation`) under the hood. In practice:
+### 1. Request Lifecycle
+```mermaid
+flowchart TD
+  Client[Client request: POST /v1/chat/completions] --> Auth[Check & Refresh Access Token]
+  Auth --> StateCheck{Are custom tools present?}
+  StateCheck -->|No| Stateful[Use Stateful Cache Turn Mapping]
+  StateCheck -->|Yes| Stateless[Use Stateless Fallback + XML Prompt Preamble]
+  Stateful & Stateless --> PoW[Solve Sentinel Proof-of-Work SHA3-512]
+  PoW --> Upstream[POST chatgpt.com/backend-api/conversation]
+  Upstream --> SSE[Re-encode SSE chunks to OpenAI format]
+  SSE --> Parser[Extract Tool Calls if present]
+  Parser --> Response[Return JSON/Stream to Client]
+```
 
-- `GET /v1/models` is a hardcoded compatibility list (for clients that expect the endpoint), not a live probe of which upstream models you can actually use.
-- The upstream endpoint may ignore an unrecognized/unauthorized `model` value and silently route you elsewhere.
-- Asking the assistant to “self-identify” its model is not reliable.
+### 2. Stateful Conversation Threads
+When no custom client tools are present, the proxy automatically maps turn histories to the exact `conversation_id` and `parent_message_id` on the ChatGPT backend. 
+- Computes a SHA-256 fingerprint of the message history prefix (roles, names, contents, and tool outputs).
+- Hits or misses local thread caches to maintain context natively on ChatGPT's servers without having to re-send collapsed context.
 
-For debugging, `server.js` attempts to extract an upstream model slug from the ChatGPT SSE payload (when present) and returns it as `response.model`. If no upstream model slug is present, the proxy falls back to echoing the requested model id.
+### 3. Agent Tool Call Fallback (Kilo Code)
+ChatGPT's backend does not support registering custom, client-side tools (like a local terminal execution tool). When client tools are sent:
+1. **Stateless Fallback**: The proxy bypasses stateful mapping and falls back to a stateless conversation turn.
+2. **Preamble Injection**: Prepends a strict `<tool_call>` system prompt protocol to the prompt message describing the XML formatting.
+3. **Model Upgrade**: Automatically upgrades the request model to `gpt-5-5-thinking` (if a reasoning model is not already requested) to guarantee strong protocol adherence.
+
+### 4. Robust 4-Pass Tool Call Parser
+The proxy is highly resilient to model variations and parses tool calls using four sequential passes:
+- **Pass 1 (XML Tags)**: Matches generic tags: `<tool_call>`, `<function_call>`, `<call>`, or `<tool>`.
+- **Pass 2 (Fenced JSON)**: Parses bare JSON objects inside code fences (e.g. ` ```json ... ``` `) if no XML tags are emitted.
+- **Pass 3 (Bare Function Calls)**: Extracts standard function call formatting: `tool_name(json_arguments)`.
+- **Pass 4 (Custom XML Tags)**: Matches tags named after the tool itself (e.g. `<file_search.msearch>{"queries":[]}</file_search.msearch>`), ignoring a blacklist of standard HTML tags to avoid false positives.
 
 ---
 
 ## 🛠️ Step-by-Step Setup Guide
 
 ### 1. Extract Your Session Cookie
-To let the server call ChatGPT on your behalf, you need to copy your long-lived session cookie:
-
-1. Open your browser and go to [https://chatgpt.com](https://chatgpt.com). Make sure you are logged in.
-2. Press `F12` or `Cmd + Option + I` to open the developer tools.
-3. Navigate to the **Application** tab (Chrome/Edge/Safari) or **Storage** tab (Firefox).
-4. In the left panel, expand **Cookies** and select `https://chatgpt.com`.
-5. Look for the cookie named **`__Secure-next-auth.session-token`**.
-6. Copy its **Value** (it is a very long string of characters).
-
----
+To let the server call ChatGPT on your behalf, copy your long-lived session cookie:
+1. Go to [https://chatgpt.com](https://chatgpt.com) and log in.
+2. Press `F12` (or `Cmd + Option + I` on Mac) to open DevTools.
+3. Go to the **Application** tab (Chrome/Edge/Safari) or **Storage** tab (Firefox).
+4. Expand **Cookies** and select `https://chatgpt.com`.
+5. Locate the cookie named **`__Secure-next-auth.session-token`** and copy its **Value** (a very long string).
 
 ### 2. Configure Environment Variables
-Open the `.env` file in the project folder and paste your copied token:
-
+Create a `.env` file in the project directory:
 ```env
 PORT=3000
 
 # Paste your copied session token here:
 CHATGPT_SESSION_TOKEN=eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0...
 
-# (Optional) Add a local API key to protect your proxy server:
+# (Optional) Full raw cookie header from chatgpt.com if Sentinel still 401s:
+CHATGPT_COOKIES=
+
+# (Optional) Add a local API key to protect your proxy:
 PROXY_API_KEY=
 
-# Default model id to send upstream when the client omits "model"
+# Default model id to send upstream when client omits it
 DEFAULT_MODEL=auto
+
+# Auto-upgrade standard models to thinking variants when tools are present (default: true)
+TOOL_FORCE_THINKING=true
 ```
 
----
-
 ### 3. Start the Server
-Run the following commands to install dependencies and start the server:
-
 ```bash
-# Install dependencies (only required the first time)
+# Install dependencies
 npm install
 
 # Start the proxy server
 npm start
 ```
-
-If the configured port is already in use, override it:
-
+By default, the server starts on `http://localhost:3000`. Override the port if needed:
 ```bash
 PORT=3002 npm start
 ```
 
-You should see:
-```text
-====================================================
- ChatGPT Unofficial API Proxy Server is running!
- Listening on: http://localhost:3000
- Base API endpoint: http://localhost:3000/v1
-====================================================
-```
-
 ---
 
-## 🚀 How to Integrate and Use Your Endpoint
+## 🚀 Client Integration Guide
 
-Once the proxy is running, you can connect it to any client by swapping the API base URL.
-
-### 1. Using `curl` (Testing the API)
-
-**Streaming Request (Recommended):**
-```bash
-curl -N http://localhost:3000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "gpt-4o",
-    "messages": [{"role": "user", "content": "Tell me a 3-word story."}],
-    "stream": true
-  }'
-```
-
-**Non-Streaming Request:**
-```bash
-curl http://localhost:3000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "gpt-4o",
-    "messages": [{"role": "user", "content": "What is 2+2?"}]
-  }'
-```
-
----
-
-### 2. In Python (with standard `openai` library)
-Set the `api_key` to a dummy value (or your `PROXY_API_KEY` if configured) and configure `base_url` to point to your local proxy:
-
-```python
-from openai import OpenAI
-
-client = OpenAI(
-    api_key="anything",  # Or your PROXY_API_KEY
-    base_url="http://localhost:3000/v1"
-)
-
-response = client.chat.completions.create(
-    model="gpt-4o",
-    messages=[
-        {"role": "user", "content": "Why is the sky blue?"}
-    ],
-    stream=True
-)
-
-for chunk in response:
-    content = chunk.choices[0].delta.content
-    if content:
-        print(content, end="", flush=True)
-print()
-```
-
----
-
-### 3. In Node.js (with official `openai` library)
-```javascript
-const { OpenAI } = require("openai");
-
-const openai = new OpenAI({
-  apiKey: "anything", // Or your PROXY_API_KEY
-  baseURL: "http://localhost:3000/v1"
-});
-
-async function main() {
-  const stream = await openai.chat.completions.create({
-    model: "gpt-4o",
-    messages: [{ role: "user", content: "Write a short poem about coding." }],
-    stream: true,
-  });
-  
-  for await (const chunk of stream) {
-    process.stdout.write(chunk.choices[0]?.delta?.content || "");
-  }
+### 1. Kilo Code (VS Code Extension)
+Open your global `~/.config/kilo/kilo.jsonc` file and configure a custom provider:
+```jsonc
+{
+  "provider": {
+    "chatgpt-gateway": {
+      "name": "ChatGPT Gateway",
+      "api": "http://localhost:3000/v1",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "apiKey": "anything", // Or your PROXY_API_KEY
+        "baseURL": "http://localhost:3000/v1"
+      },
+      "models": {
+        "gpt-5-5-thinking": { "name": "GPT-5.5 Thinking" },
+        "gpt-5-5": { "name": "GPT-5.5" }
+      }
+    }
+  },
+  "model": "chatgpt-gateway/gpt-5-5-thinking"
 }
-
-main();
 ```
 
----
+### 2. Cursor IDE
+1. Open Cursor **Settings** -> **Models**.
+2. Under **OpenAI API**, override the Base URL: `http://localhost:3000/v1`.
+3. Set the API Key to `anything` (or your configured `PROXY_API_KEY`).
 
-### 4. Inside Desktop AI Clients (e.g. LobeChat, NextChat, LibreChat)
-Most UI clients allow adding a custom OpenAI provider or overriding the Base URL:
-- **API Key**: Set to any text (e.g. `dummy` or your `PROXY_API_KEY`).
-- **Proxy/Base URL**: Set to `http://localhost:3000/v1`.
-
-### 5. Inside Cursor IDE or VS Code Extensions (e.g. Continue)
-For **Continue** config:
+### 3. Continue (VS Code Extension)
+Add the model definition to your `config.json`:
 ```json
 {
   "models": [
     {
       "title": "ChatGPT Local Proxy",
       "provider": "openai",
-      "model": "gpt-4o",
+      "model": "gpt-5-5-thinking",
       "apiBase": "http://localhost:3000/v1",
       "apiKey": "anything"
     }
@@ -194,19 +150,20 @@ For **Continue** config:
 }
 ```
 
+### 4. LobeChat / NextChat
+Set the custom OpenAI proxy URL:
+- **API Key**: `anything`
+- **Base URL**: `http://localhost:3000/v1`
+
 ---
 
-## 🧪 Verify What The Proxy Reports As The Model
-
-With the server running, you can run:
-
-```bash
-BASE_URL=http://localhost:3000/v1 node scripts/verify-models.mjs
-```
-
-This script calls `GET /v1/models`, then sends one non-streaming request per model id and prints the requested model id plus the proxy's `response.model` (which may be an upstream slug if the upstream provided one).
-
 ## ⚠️ Essential Notices & Disclaimers
-- **Rate Limits & IP Blocks**: This proxy uses your browser's session, which means you are subject to the same rate limits and IP checks as the ChatGPT web application. If you make too many fast parallel requests, your IP may get flagged by Cloudflare or your account temporarily rate-limited.
-- **Account Security**: Keep your `__Secure-next-auth.session-token` secure. Sharing it or checking it into Git gives anyone full control of your ChatGPT account!
-- **Terms of Service**: This is an unofficial tool and violates OpenAI's terms of service regarding automated scraping. Use it strictly for personal experimentation and evaluation.
+
+> [!WARNING]
+> **Account Security**: Keep your `__Secure-next-auth.session-token` secure. Sharing it or checking it into public repositories gives anyone full control of your ChatGPT account!
+
+> [!IMPORTANT]
+> **Rate Limits & IP Blocks**: This proxy uses your browser's session, making you subject to the same rate limits and IP checks as the web application. Fast parallel requests may trigger Cloudflare checks or temporary rate-limiting.
+
+> [!CAUTION]
+> **Terms of Service**: This is an unofficial tool and violates OpenAI's terms of service regarding automated scrapers. Use it strictly for personal evaluation and experimentation.
