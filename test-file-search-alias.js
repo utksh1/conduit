@@ -39,4 +39,13 @@ const allowed = new Set(["glob", "grep", "read", "bash"]);
   assert.deepStrictEqual(JSON.parse(toolCalls[0].function.arguments), { pattern: "TODO" });
 }
 
+{
+  const text = `{"queries":[""], "source_filter": ["file_library"], "intent": "nav"}`;
+  const { cleanedText, toolCalls } = extractToolCalls(text, allowed);
+  assert.strictEqual(cleanedText, "");
+  assert.strictEqual(toolCalls.length, 1);
+  assert.strictEqual(toolCalls[0].function.name, "glob");
+  assert.deepStrictEqual(JSON.parse(toolCalls[0].function.arguments), { pattern: "**/*" });
+}
+
 console.log("file_search.msearch alias tests passed");

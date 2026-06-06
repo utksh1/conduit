@@ -930,9 +930,12 @@ function tryParseToolCallBody(raw) {
 
 function buildToolCall(parsed, idx) {
   if (!parsed || typeof parsed !== "object") return null;
-  const name = parsed.name || parsed.function || parsed.tool || parsed.tool_name;
+  let name = parsed.name || parsed.function || parsed.tool || parsed.tool_name;
+  if (!name && Array.isArray(parsed.queries) && (parsed.source_filter || parsed.intent)) {
+    name = "file_search.msearch";
+  }
   if (!name || typeof name !== "string") return null;
-  const args = parsed.arguments ?? parsed.args ?? parsed.input ?? parsed.parameters ?? {};
+  const args = parsed.arguments ?? parsed.args ?? parsed.input ?? parsed.parameters ?? (name === "file_search.msearch" ? parsed : {});
   return {
     id: parsed.id || `call_${Date.now().toString(36)}_${idx}`,
     type: "function",
@@ -1088,7 +1091,23 @@ function extractToolCalls(text, allowedToolNames) {
     }
   }
 
-  // Pass 3: if still no tool calls found, look for a bare "tool_name(json_arguments)" pattern.
+  // Pass 3: if still no tool calls found, parse a bare JSON object. Some models
+  // emit hosted file-search payloads like {"queries":[""],"intent":"nav"} as text.
+  if (toolCalls.length === 0) {
+    const parsed = tryParseToolCallBody(text.trim());
+    const built = normalizeUnavailableToolCall(buildToolCall(parsed, idx), allowedToolNames);
+    if (built) {
+      if (allowedToolNames && !allowedToolNames.has(built.function.name)) {
+        console.warn(`[Proxy] Dropping bare JSON tool call '${built.function.name}' — not in client's tools list.`);
+      } else {
+        toolCalls.push(built);
+        idx++;
+        spans.push({ start: 0, end: text.length });
+      }
+    }
+  }
+
+  // Pass 4: if still no tool calls found, look for a bare "tool_name(json_arguments)" pattern.
   if (toolCalls.length === 0) {
     const fnRe = /([a-zA-Z0-9_\.]+)\s*\(\s*(\{[\s\S]*?\})\s*\)/g;
     let m;
@@ -1112,7 +1131,7 @@ function extractToolCalls(text, allowedToolNames) {
     }
   }
 
-  // Pass 4: if still no tool calls found, look for custom-named XML tags like <tool_name>json_arguments</tool_name>.
+  // Pass 5: if still no tool calls found, look for custom-named XML tags like <tool_name>json_arguments</tool_name>.
   if (toolCalls.length === 0) {
     const customTagRe = /<([a-zA-Z0-9_\-\.]+)>([\s\S]*?)<\/(\1)>/g;
     const IGNORED_TAGS = new Set([
