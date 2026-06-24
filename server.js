@@ -2509,7 +2509,9 @@ function responsesToChat(body) {
         id: toolCallId,
         type: "function",
         function: {
-          name: item.name || "unknown",
+          // Strip namespace prefix (e.g. "mcp__codex_apps__github/_list_repositories" → "_list_repositories")
+          // OpenAI rejects "/" in tool names, but Codex sends the full namespaced path in history
+          name: (item.name || "unknown").includes("/") ? item.name.split("/").pop() : (item.name || "unknown"),
           arguments:
             typeof item.arguments === "string"
               ? item.arguments
@@ -2551,6 +2553,8 @@ function responsesToChat(body) {
 
   // Convert Responses-style internally-tagged tools to Chat externally-tagged.
   // Preserve native tool types (web_search_preview, web_search) alongside function tools.
+  // toolNameMap: maps OpenAI-safe sub-tool names → "namespace/subToolName" for Codex routing.
+  const toolNameMap = new Map();
   let chatTools;
   if (Array.isArray(body.tools) && body.tools.length > 0) {
     chatTools = [];
@@ -2589,6 +2593,10 @@ function responsesToChat(body) {
       } else if (t.type === "namespace" && Array.isArray(t.tools)) {
         for (const subTool of t.tools) {
           if (subTool && subTool.type === "function") {
+            // Map the bare sub-tool name to the full namespaced path Codex expects
+            // e.g. "_list_repositories" → "mcp__codex_apps__github/_list_repositories"
+            const namespacedName = `${t.name}/${subTool.name}`;
+            toolNameMap.set(subTool.name, namespacedName);
             chatTools.push({
               type: "function",
               function: {
@@ -2656,13 +2664,13 @@ function responsesToChat(body) {
   if (chatTools) chatBody.tools = chatTools;
   if (toolChoice !== undefined) chatBody.tool_choice = toolChoice;
 
-  return { chatBody, callIdToToolCallId };
+  return { chatBody, callIdToToolCallId, toolNameMap };
 }
 
 /**
  * Build a Responses-shape JSON body from a buffered Chat completion response.
  */
-function chatToResponses(chatJson, responseId, callIdToToolCallId) {
+function chatToResponses(chatJson, responseId, callIdToToolCallId, toolNameMap) {
   const choice = chatJson.choices?.[0] || {};
   const msg = choice.message || {};
   const output = [];
@@ -2709,7 +2717,7 @@ function chatToResponses(chatJson, responseId, callIdToToolCallId) {
           type: "function_call",
           status: "completed",
           call_id: invertId(tc.id),
-          name: tc.function?.name || "unknown",
+          name: (toolNameMap && toolNameMap.get(tc.function?.name)) || tc.function?.name || "unknown",
           arguments: tc.function?.arguments || "{}",
         });
       }
@@ -2785,7 +2793,7 @@ app.post("/v1/responses", async (req, res) => {
     });
   }
 
-  const { chatBody, callIdToToolCallId } = translated;
+  const { chatBody, callIdToToolCallId, toolNameMap } = translated;
 
   // Apply per-key model policy on the translated chat body.
   const responseHasTools = Array.isArray(chatBody.tools) && chatBody.tools.length > 0 && chatBody.tool_choice !== "none";
@@ -2874,7 +2882,7 @@ app.post("/v1/responses", async (req, res) => {
       });
     }
 
-    const responseBody = chatToResponses(chatJson, responseId, callIdToToolCallId);
+    const responseBody = chatToResponses(chatJson, responseId, callIdToToolCallId, toolNameMap);
     req._meter.actualOut = chatJson?.usage?.completion_tokens || 0;
     return res.json(responseBody);
   } else {
@@ -3052,8 +3060,10 @@ app.post("/v1/responses", async (req, res) => {
             for (const tc of delta.tool_calls) {
               const idx = tc.index ?? 0;
               if (!activeToolCalls.has(idx)) {
-                const name = tc.function?.name || "unknown";
-                const isPatch = name === "apply_patch";
+                const rawName = tc.function?.name || "unknown";
+                // Restore namespace prefix for Codex routing
+                const name = (toolNameMap && toolNameMap.get(rawName)) || rawName;
+                const isPatch = rawName === "apply_patch";
                 const toolCallId = tc.id || `call_${Date.now().toString(36)}_${idx}`;
                 const callId = invertId(toolCallId);
                 const type = isPatch ? "apply_patch_call" : "function_call";
