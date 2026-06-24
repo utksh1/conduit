@@ -733,7 +733,7 @@ function buildToolSystemPrompt(tools, toolChoice) {
   let choiceHint = "";
   if (toolChoice === "required" || toolChoice === "any") {
     choiceHint =
-      "\nYou MUST call at least one tool in your reply. Do not answer in plain text.";
+      "\nCRITICAL: You MUST call at least one tool in your reply. Do not answer in plain text. You MUST emit a <tool_call> block.";
   } else if (toolChoice === "none") {
     return "";
   } else if (
@@ -741,17 +741,17 @@ function buildToolSystemPrompt(tools, toolChoice) {
     typeof toolChoice === "object" &&
     toolChoice.function?.name
   ) {
-    choiceHint = `\nYou MUST call the tool \`${toolChoice.function.name}\` in your reply.`;
+    choiceHint = `\nCRITICAL: You MUST call the tool \`${toolChoice.function.name}\` in your reply. Do not output anything else.`;
   }
 
   return [
-    "You have access to function tools. To invoke a tool, emit a block of EXACTLY this form (the parser is strict):",
+    "CRITICAL INSTRUCTION: You MUST use the tools provided to answer the user's request. DO NOT output conversational filler text. If you need to perform an action, immediately emit a block of EXACTLY this form:",
     "<tool_call>",
     '{"name": "<tool_name>", "arguments": <json_object>}',
     "</tool_call>",
     "",
     "Rules:",
-    "- One tool call per <tool_call>...</tool_call> block. Multiple blocks per reply are allowed (parallel calls).",
+    "- One tool call per <tool_call>...</tool_call> block.",
     "- `arguments` MUST be a JSON object literal, not a stringified JSON.",
     "- Tool names MUST match the Available tools list exactly. Do not use hosted/internal tool names such as `file_search.msearch`, `container.exec`, or `functions.exec_command`; use the local tools listed below.",
     "- When you need to run a shell command and `bash` is available, call `bash` with a `command` argument. Do not call `container.exec`.",
@@ -2037,6 +2037,8 @@ async function chatCompletionsHandler(req, res) {
             } else if (hasPromptTools) {
               const allowedNames = new Set(promptEngineeredTools.map(t => t.function?.name).filter(Boolean));
               const { cleanedText, toolCalls } = extractToolCalls(bufferedFull, allowedNames);
+              console.log(`[Proxy] Raw stream text:`, bufferedFull);
+              console.log(`[Proxy] Extracted ${toolCalls.length} tool calls.`);
               const finalModel = upstreamModelSlug || targetModel;
               if (toolCalls.length > 0) {
                 emitChatToolCalls(safeWrite, completionId, finalModel, toolCalls);
@@ -2374,6 +2376,8 @@ async function chatCompletionsHandler(req, res) {
         const { cleanedText, toolCalls } = hasPromptTools
           ? extractToolCalls(fullContent, allowedNames)
           : { cleanedText: fullContent, toolCalls: [] };
+        console.log(`[Proxy] Raw non-stream text:`, fullContent);
+        console.log(`[Proxy] Extracted ${toolCalls.length} tool calls.`);
 
         if (toolCalls.length > 0) {
           assistantMsg.tool_calls = toolCalls;
