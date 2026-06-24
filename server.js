@@ -1625,6 +1625,7 @@ async function modelsHandler(req, res) {
   }
   const mapped = models.map((id) => ({
     id,
+    slug: id,
     object: "model",
     created: 1715644800,
     owned_by: "openai",
@@ -1932,6 +1933,7 @@ async function chatCompletionsHandler(req, res) {
       res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-cache");
       res.setHeader("Connection", "keep-alive");
+      res.setHeader("X-Accel-Buffering", "no");
 
       // ── Client disconnect guard ────────────────────────────────────────
       let clientDisconnected = false;
@@ -2879,6 +2881,7 @@ app.post("/v1/responses", async (req, res) => {
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
 
     let seq = 0;
     const sendEvent = (event, data) => {
