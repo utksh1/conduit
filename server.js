@@ -2952,16 +2952,22 @@ app.post("/v1/responses", async (req, res) => {
     const finalizeToolCalls = () => {
       for (const [idx, tc] of activeToolCalls.entries()) {
         if (tc.type === "apply_patch_call") {
+          // Extract patch text from JSON arguments (model sends {"patch": "..."})
+          let patchVal = tc.rawArgs;
+          try {
+            const parsedArgs = JSON.parse(tc.rawArgs);
+            patchVal = parsedArgs.patch || parsedArgs.content || parsedArgs.code || tc.rawArgs;
+          } catch (_) { /* use raw args as-is */ }
           sendEvent("response.apply_patch_call_arguments.done", {
             item_id: tc.id,
             output_index: idx + 1,
-            patch: tc.rawArgs,
-            arguments: tc.rawArgs,
+            patch: patchVal,
+            arguments: patchVal,
           });
           sendEvent("response.apply_patch_call_patch.done", {
             item_id: tc.id,
             output_index: idx + 1,
-            patch: tc.rawArgs,
+            patch: patchVal,
           });
           sendEvent("response.output_item.done", {
             output_index: idx + 1,
@@ -2970,7 +2976,7 @@ app.post("/v1/responses", async (req, res) => {
               type: "apply_patch_call",
               status: "completed",
               call_id: tc.callId,
-              patch: tc.rawArgs
+              patch: patchVal
             }
           });
         } else {
@@ -3127,12 +3133,18 @@ app.post("/v1/responses", async (req, res) => {
       }
       for (const [idx, tc] of activeToolCalls.entries()) {
         if (tc.type === "apply_patch_call") {
+          // Extract patch text from JSON arguments
+          let patchVal = tc.rawArgs;
+          try {
+            const parsedArgs = JSON.parse(tc.rawArgs);
+            patchVal = parsedArgs.patch || parsedArgs.content || parsedArgs.code || tc.rawArgs;
+          } catch (_) { /* use raw args as-is */ }
           finalOutput.push({
             id: tc.id,
             type: "apply_patch_call",
             status: "completed",
             call_id: tc.callId,
-            patch: tc.rawArgs
+            patch: patchVal
           });
         } else {
           finalOutput.push({
