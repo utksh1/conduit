@@ -856,7 +856,7 @@ function formatMessages(messages, tools, toolChoice) {
  */
 function enforceThinkingForTools(requestedModel, hasTools) {
   if (!hasTools) return requestedModel;
-  if (process.env.TOOL_FORCE_THINKING !== "true") return requestedModel;
+  if (process.env.TOOL_FORCE_THINKING === "false") return requestedModel;
   const m = (requestedModel || "").toLowerCase();
   // Already a thinking/reasoning model — leave it alone.
   if (m.includes("thinking") || m.includes("reasoning") || m === "o3" || m === "o4" || m.startsWith("o1")) {
@@ -1623,14 +1623,16 @@ async function modelsHandler(req, res) {
   } catch (_) {
     // Fall through with the full list if anything goes sideways.
   }
+  const mapped = models.map((id) => ({
+    id,
+    object: "model",
+    created: 1715644800,
+    owned_by: "openai",
+  }));
   res.json({
     object: "list",
-    data: models.map((id) => ({
-      id,
-      object: "model",
-      created: 1715644800,
-      owned_by: "openai",
-    })),
+    data: mapped,
+    models: mapped,
   });
 }
 
@@ -2469,7 +2471,7 @@ function responsesToChat(body) {
       : [];
 
   // Buffer tool_calls per assistant message so we collapse a contiguous run of
-  // function_call items into one assistant message with multiple tool_calls.
+  // function_call / apply_patch_call items into one assistant message with multiple tool_calls.
   let pendingAssistant = null;
   const flushAssistant = () => {
     if (pendingAssistant) {
@@ -2512,7 +2514,23 @@ function responsesToChat(body) {
               : JSON.stringify(item.arguments ?? {}),
         },
       });
-    } else if (item.type === "function_call_output") {
+    } else if (item.type === "apply_patch_call") {
+      const toolCallId =
+        callIdToToolCallId.get(item.call_id) ||
+        `call_${Date.now().toString(36)}_${nextSyntheticId++}`;
+      callIdToToolCallId.set(item.call_id, toolCallId);
+      if (!pendingAssistant) {
+        pendingAssistant = { role: "assistant", content: null, tool_calls: [] };
+      }
+      pendingAssistant.tool_calls.push({
+        id: toolCallId,
+        type: "function",
+        function: {
+          name: "apply_patch",
+          arguments: JSON.stringify({ patch: item.patch || "" }),
+        },
+      });
+    } else if (item.type === "function_call_output" || item.type === "apply_patch_call_output") {
       flushAssistant();
       const toolCallId =
         callIdToToolCallId.get(item.call_id) || item.call_id || "unknown";
@@ -2548,6 +2566,77 @@ function responsesToChat(body) {
       } else if (t.type === "web_search_preview" || t.type === "web_search") {
         // Pass through native search tool as-is — the inner handler will detect it
         chatTools.push(t);
+      } else if (t.type === "custom" && t.name === "apply_patch") {
+        chatTools.push({
+          type: "function",
+          function: {
+            name: "apply_patch",
+            description: t.description || "Use the `apply_patch` tool to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.",
+            parameters: {
+              type: "object",
+              properties: {
+                patch: {
+                  type: "string",
+                  description: "The Lark grammar patch string following the specified syntax."
+                }
+              },
+              required: ["patch"]
+            }
+          }
+        });
+      } else if (t.type === "namespace" && Array.isArray(t.tools)) {
+        for (const subTool of t.tools) {
+          if (subTool && subTool.type === "function") {
+            chatTools.push({
+              type: "function",
+              function: {
+                name: subTool.name,
+                description: subTool.description,
+                parameters: subTool.parameters,
+              }
+            });
+          }
+        }
+      } else if (t.type === "tool_search") {
+        chatTools.push({
+          type: "function",
+          function: {
+            name: "tool_search",
+            description: t.description || "Search for deferred tools.",
+            parameters: t.parameters || {
+              type: "object",
+              properties: {
+                query: {
+                  type: "string",
+                  description: "Search query for deferred tools."
+                },
+                limit: {
+                  type: "number",
+                  description: "Maximum number of tools to return. Defaults to 8."
+                }
+              },
+              required: ["query"]
+            }
+          }
+        });
+      } else if (t.type === "image_generation") {
+        chatTools.push({
+          type: "function",
+          function: {
+            name: "image_generation",
+            description: t.description || "Generate an image or edit existing images based on a text prompt.",
+            parameters: t.parameters || {
+              type: "object",
+              properties: {
+                prompt: {
+                  type: "string",
+                  description: "The text prompt to generate an image for."
+                }
+              },
+              required: ["prompt"]
+            }
+          }
+        });
       }
     }
   }
@@ -2597,14 +2686,31 @@ function chatToResponses(chatJson, responseId, callIdToToolCallId) {
 
   if (Array.isArray(msg.tool_calls)) {
     for (const tc of msg.tool_calls) {
-      output.push({
-        id: `fc_${tc.id}`,
-        type: "function_call",
-        status: "completed",
-        call_id: invertId(tc.id),
-        name: tc.function?.name || "unknown",
-        arguments: tc.function?.arguments || "{}",
-      });
+      if (tc.function?.name === "apply_patch") {
+        let patchVal = "";
+        try {
+          const parsedArgs = JSON.parse(tc.function.arguments);
+          patchVal = parsedArgs.patch || parsedArgs.content || parsedArgs.code || tc.function.arguments;
+        } catch (e) {
+          patchVal = tc.function.arguments;
+        }
+        output.push({
+          id: `fc_${tc.id}`,
+          type: "apply_patch_call",
+          status: "completed",
+          call_id: invertId(tc.id),
+          patch: patchVal,
+        });
+      } else {
+        output.push({
+          id: `fc_${tc.id}`,
+          type: "function_call",
+          status: "completed",
+          call_id: invertId(tc.id),
+          name: tc.function?.name || "unknown",
+          arguments: tc.function?.arguments || "{}",
+        });
+      }
     }
   }
 
@@ -2839,6 +2945,33 @@ app.post("/v1/responses", async (req, res) => {
         });
       }
       sendEvent("response.output_item.done", { output_index: i, item });
+    } else if (item.type === "apply_patch_call") {
+      const stub = { ...item, patch: "", status: "in_progress" };
+      sendEvent("response.output_item.added", { output_index: i, item: stub });
+      if (item.patch) {
+        sendEvent("response.apply_patch_call_arguments.delta", {
+          item_id: item.id,
+          output_index: i,
+          delta: item.patch,
+        });
+        sendEvent("response.apply_patch_call_patch.delta", {
+          item_id: item.id,
+          output_index: i,
+          delta: item.patch,
+        });
+        sendEvent("response.apply_patch_call_arguments.done", {
+          item_id: item.id,
+          output_index: i,
+          patch: item.patch,
+          arguments: item.patch,
+        });
+        sendEvent("response.apply_patch_call_patch.done", {
+          item_id: item.id,
+          output_index: i,
+          patch: item.patch,
+        });
+      }
+      sendEvent("response.output_item.done", { output_index: i, item });
     }
   }
 
@@ -2865,6 +2998,8 @@ app._internals = {
   normalizeUnavailableToolCall,
   buildNormalizedToolCall,
   shouldTryEarlyToolExtraction,
+  responsesToChat,
+  chatToResponses,
 };
 
 module.exports = app;
