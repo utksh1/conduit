@@ -77,12 +77,19 @@ function cacheConversationMapping(prefixHash, conversationId, parentMessageId, o
 // OpenAPI / Swagger spec — describes the OpenAI-compatible surface of this gateway.
 const SUPPORTED_MODELS = [
   "gpt-5-5",
+  "gpt-5.5",
   "gpt-5-5-instant",
+  "gpt-5.5-instant",
   "gpt-5-5-thinking",
+  "gpt-5.5-thinking",
   "gpt-5-4-thinking",
+  "gpt-5.4-thinking",
   "gpt-5-3-instant",
+  "gpt-5.3-instant",
   "gpt-5-2-instant",
+  "gpt-5.2-instant",
   "gpt-5-2-thinking",
+  "gpt-5.2-thinking",
   "o3",
 ];
 
