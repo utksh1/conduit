@@ -1941,6 +1941,7 @@ async function chatCompletionsHandler(req, res) {
       res.setHeader("Cache-Control", "no-cache");
       res.setHeader("Connection", "keep-alive");
       res.setHeader("X-Accel-Buffering", "no");
+      res.flushHeaders();
 
       // ── Client disconnect guard ────────────────────────────────────────
       let clientDisconnected = false;
@@ -2897,6 +2898,7 @@ app.post("/v1/responses", async (req, res) => {
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
     res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
 
     let seq = 0;
     const sendEvent = (event, data) => {
