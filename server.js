@@ -2839,145 +2839,328 @@ app.post("/v1/responses", async (req, res) => {
     }
   }
 
-  // Always non-streaming internally — we buffer the Chat response and either
-  // return JSON or synthesize Responses-shape SSE events.
-  const internalBody = { ...chatBody, stream: false };
-
-  let chatJson;
-  try {
-    const internalRes = await fetch(`http://127.0.0.1:${PORT}/v1/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: req.headers.authorization || "",
-        "X-Internal-Bypass": INTERNAL_BYPASS_TOKEN,
-      },
-      body: JSON.stringify(internalBody),
-    });
-    if (!internalRes.ok) {
-      const errText = await internalRes.text();
-      req._meter.errorCode = "upstream_error";
-      req._meter.errorMessage = errText.slice(0, 1000);
-      return res.status(internalRes.status).send(errText);
-    }
-    chatJson = await internalRes.json();
-  } catch (err) {
-    req._meter.errorCode = "internal_server_error";
-    req._meter.errorMessage = err.message;
-    return res.status(500).json({
-      error: {
-        message: `Internal bridge call failed: ${err.message}`,
-        type: "api_error",
-        code: "internal_server_error",
-      },
-    });
-  }
-
-  const responseBody = chatToResponses(chatJson, responseId, callIdToToolCallId);
-  req._meter.actualOut = chatJson?.usage?.completion_tokens || 0;
-
   if (!wantsStream) {
+    const internalBody = { ...chatBody, stream: false };
+
+    let chatJson;
+    try {
+      const internalRes = await fetch(`http://127.0.0.1:${PORT}/v1/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: req.headers.authorization || "",
+          "X-Internal-Bypass": INTERNAL_BYPASS_TOKEN,
+        },
+        body: JSON.stringify(internalBody),
+      });
+      if (!internalRes.ok) {
+        const errText = await internalRes.text();
+        req._meter.errorCode = "upstream_error";
+        req._meter.errorMessage = errText.slice(0, 1000);
+        return res.status(internalRes.status).send(errText);
+      }
+      chatJson = await internalRes.json();
+    } catch (err) {
+      req._meter.errorCode = "internal_server_error";
+      req._meter.errorMessage = err.message;
+      return res.status(500).json({
+        error: {
+          message: `Internal bridge call failed: ${err.message}`,
+          type: "api_error",
+          code: "internal_server_error",
+        },
+      });
+    }
+
+    const responseBody = chatToResponses(chatJson, responseId, callIdToToolCallId);
+    req._meter.actualOut = chatJson?.usage?.completion_tokens || 0;
     return res.json(responseBody);
-  }
+  } else {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
 
-  // Stream: synthesize the Responses SSE lifecycle from the buffered result.
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
+    let seq = 0;
+    const sendEvent = (event, data) => {
+      res.write(`event: ${event}\n`);
+      res.write(`data: ${JSON.stringify({ sequence_number: seq++, type: event, ...data })}\n\n`);
+    };
 
-  let seq = 0;
-  const sendEvent = (event, data) => {
-    res.write(`event: ${event}\n`);
-    res.write(`data: ${JSON.stringify({ sequence_number: seq++, type: event, ...data })}\n\n`);
-  };
+    const initial = {
+      id: responseId,
+      object: "response",
+      created_at: Math.floor(Date.now() / 1000),
+      status: "in_progress",
+      model: effectiveModel,
+      output: [],
+      usage: { input_tokens: estIn, output_tokens: 0, total_tokens: estIn }
+    };
+    sendEvent("response.created", { response: initial });
+    sendEvent("response.in_progress", { response: initial });
 
-  const initial = { ...responseBody, status: "in_progress", output: [] };
-  sendEvent("response.created", { response: initial });
-  sendEvent("response.in_progress", { response: initial });
+    const internalBody = { ...chatBody, stream: true };
 
-  for (let i = 0; i < responseBody.output.length; i++) {
-    const item = responseBody.output[i];
+    const invertId = (toolCallId) => {
+      for (const [callId, id] of callIdToToolCallId.entries()) {
+        if (id === toolCallId) return callId;
+      }
+      return toolCallId;
+    };
 
-    if (item.type === "message") {
-      const stub = { ...item, status: "in_progress", content: [] };
-      sendEvent("response.output_item.added", { output_index: i, item: stub });
-      sendEvent("response.content_part.added", {
-        item_id: item.id,
-        output_index: i,
-        content_index: 0,
-        part: { type: "output_text", text: "", annotations: [] },
-      });
-      const text = item.content[0]?.text || "";
-      if (text) {
-        sendEvent("response.output_text.delta", {
-          item_id: item.id,
-          output_index: i,
-          content_index: 0,
-          delta: text,
-        });
+    let activeMessageItem = null;
+    let activeToolCalls = new Map();
+    let accumulatedOutTokens = 0;
+
+    const finalizeMessageItem = () => {
+      if (activeMessageItem) {
         sendEvent("response.output_text.done", {
-          item_id: item.id,
-          output_index: i,
+          item_id: activeMessageItem.id,
+          output_index: 0,
           content_index: 0,
-          text,
+          text: activeMessageItem.text,
+        });
+        sendEvent("response.content_part.done", {
+          item_id: activeMessageItem.id,
+          output_index: 0,
+          content_index: 0,
+          part: { type: "output_text", text: activeMessageItem.text, annotations: [] },
+        });
+        sendEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            id: activeMessageItem.id,
+            type: "message",
+            role: "assistant",
+            status: "completed",
+            content: [{ type: "output_text", text: activeMessageItem.text, annotations: [] }]
+          }
         });
       }
-      sendEvent("response.content_part.done", {
-        item_id: item.id,
-        output_index: i,
-        content_index: 0,
-        part: { type: "output_text", text, annotations: [] },
+    };
+
+    const finalizeToolCalls = () => {
+      for (const [idx, tc] of activeToolCalls.entries()) {
+        if (tc.type === "apply_patch_call") {
+          sendEvent("response.apply_patch_call_arguments.done", {
+            item_id: tc.id,
+            output_index: idx + 1,
+            patch: tc.rawArgs,
+            arguments: tc.rawArgs,
+          });
+          sendEvent("response.apply_patch_call_patch.done", {
+            item_id: tc.id,
+            output_index: idx + 1,
+            patch: tc.rawArgs,
+          });
+          sendEvent("response.output_item.done", {
+            output_index: idx + 1,
+            item: {
+              id: tc.id,
+              type: "apply_patch_call",
+              status: "completed",
+              call_id: tc.callId,
+              patch: tc.rawArgs
+            }
+          });
+        } else {
+          sendEvent("response.function_call_arguments.done", {
+            item_id: tc.id,
+            output_index: idx + 1,
+            arguments: tc.rawArgs,
+          });
+          sendEvent("response.output_item.done", {
+            output_index: idx + 1,
+            item: {
+              id: tc.id,
+              type: "function_call",
+              status: "completed",
+              call_id: tc.callId,
+              name: tc.name,
+              arguments: tc.rawArgs
+            }
+          });
+        }
+      }
+    };
+
+    try {
+      const internalRes = await fetch(`http://127.0.0.1:${PORT}/v1/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: req.headers.authorization || "",
+          "X-Internal-Bypass": INTERNAL_BYPASS_TOKEN,
+        },
+        body: JSON.stringify(internalBody),
       });
-      sendEvent("response.output_item.done", { output_index: i, item });
-    } else if (item.type === "function_call") {
-      const stub = { ...item, arguments: "", status: "in_progress" };
-      sendEvent("response.output_item.added", { output_index: i, item: stub });
-      if (item.arguments) {
-        sendEvent("response.function_call_arguments.delta", {
-          item_id: item.id,
-          output_index: i,
-          delta: item.arguments,
-        });
-        sendEvent("response.function_call_arguments.done", {
-          item_id: item.id,
-          output_index: i,
-          arguments: item.arguments,
+
+      if (!internalRes.ok) {
+        const errText = await internalRes.text();
+        req._meter.errorCode = "upstream_error";
+        req._meter.errorMessage = errText.slice(0, 1000);
+        res.write(`event: error\n`);
+        res.write(`data: ${JSON.stringify({ error: errText })}\n\n`);
+        res.end();
+        return;
+      }
+
+      let buffer = "";
+      for await (const chunk of internalRes.body) {
+        buffer += new TextDecoder().decode(chunk);
+        const lines = buffer.split("\n");
+        buffer = lines.pop();
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith("data: ")) continue;
+          const jsonStr = trimmed.slice(6);
+          if (jsonStr === "[DONE]") continue;
+
+          let parsed;
+          try { parsed = JSON.parse(jsonStr); } catch { continue; }
+
+          const choice = parsed.choices?.[0] || {};
+          const delta = choice.delta || {};
+
+          if (delta.content && typeof delta.content === "string") {
+            if (!activeMessageItem) {
+              activeMessageItem = { id: `msg_${responseId}`, text: "" };
+              const stub = { id: activeMessageItem.id, type: "message", role: "assistant", status: "in_progress", content: [] };
+              sendEvent("response.output_item.added", { output_index: 0, item: stub });
+              sendEvent("response.content_part.added", {
+                item_id: activeMessageItem.id,
+                output_index: 0,
+                content_index: 0,
+                part: { type: "output_text", text: "", annotations: [] },
+              });
+            }
+
+            activeMessageItem.text += delta.content;
+            accumulatedOutTokens++;
+            sendEvent("response.output_text.delta", {
+              item_id: activeMessageItem.id,
+              output_index: 0,
+              content_index: 0,
+              delta: delta.content,
+            });
+          }
+
+          if (Array.isArray(delta.tool_calls)) {
+            for (const tc of delta.tool_calls) {
+              const idx = tc.index ?? 0;
+              if (!activeToolCalls.has(idx)) {
+                const name = tc.function?.name || "unknown";
+                const isPatch = name === "apply_patch";
+                const toolCallId = tc.id || `call_${Date.now().toString(36)}_${idx}`;
+                const callId = invertId(toolCallId);
+                const type = isPatch ? "apply_patch_call" : "function_call";
+
+                const item = isPatch 
+                  ? { id: `fc_${toolCallId}`, type, status: "in_progress", call_id: callId, patch: "" }
+                  : { id: `fc_${toolCallId}`, type, status: "in_progress", call_id: callId, name, arguments: "" };
+
+                activeToolCalls.set(idx, {
+                  id: `fc_${toolCallId}`,
+                  name,
+                  type,
+                  rawArgs: "",
+                  callId
+                });
+
+                sendEvent("response.output_item.added", { output_index: idx + 1, item });
+              }
+
+              const activeTc = activeToolCalls.get(idx);
+              const argDelta = tc.function?.arguments || "";
+              if (argDelta) {
+                activeTc.rawArgs += argDelta;
+                accumulatedOutTokens++;
+                if (activeTc.type === "apply_patch_call") {
+                  sendEvent("response.apply_patch_call_arguments.delta", {
+                    item_id: activeTc.id,
+                    output_index: idx + 1,
+                    delta: argDelta,
+                  });
+                  sendEvent("response.apply_patch_call_patch.delta", {
+                    item_id: activeTc.id,
+                    output_index: idx + 1,
+                    delta: argDelta,
+                  });
+                } else {
+                  sendEvent("response.function_call_arguments.delta", {
+                    item_id: activeTc.id,
+                    output_index: idx + 1,
+                    delta: argDelta,
+                  });
+                }
+              }
+            }
+          }
+        }
+      }
+
+      finalizeMessageItem();
+      finalizeToolCalls();
+
+      const finalOutput = [];
+      if (activeMessageItem) {
+        finalOutput.push({
+          id: activeMessageItem.id,
+          type: "message",
+          role: "assistant",
+          status: "completed",
+          content: [{ type: "output_text", text: activeMessageItem.text, annotations: [] }]
         });
       }
-      sendEvent("response.output_item.done", { output_index: i, item });
-    } else if (item.type === "apply_patch_call") {
-      const stub = { ...item, patch: "", status: "in_progress" };
-      sendEvent("response.output_item.added", { output_index: i, item: stub });
-      if (item.patch) {
-        sendEvent("response.apply_patch_call_arguments.delta", {
-          item_id: item.id,
-          output_index: i,
-          delta: item.patch,
-        });
-        sendEvent("response.apply_patch_call_patch.delta", {
-          item_id: item.id,
-          output_index: i,
-          delta: item.patch,
-        });
-        sendEvent("response.apply_patch_call_arguments.done", {
-          item_id: item.id,
-          output_index: i,
-          patch: item.patch,
-          arguments: item.patch,
-        });
-        sendEvent("response.apply_patch_call_patch.done", {
-          item_id: item.id,
-          output_index: i,
-          patch: item.patch,
-        });
+      for (const [idx, tc] of activeToolCalls.entries()) {
+        if (tc.type === "apply_patch_call") {
+          finalOutput.push({
+            id: tc.id,
+            type: "apply_patch_call",
+            status: "completed",
+            call_id: tc.callId,
+            patch: tc.rawArgs
+          });
+        } else {
+          finalOutput.push({
+            id: tc.id,
+            type: "function_call",
+            status: "completed",
+            call_id: tc.callId,
+            name: tc.name,
+            arguments: tc.rawArgs
+          });
+        }
       }
-      sendEvent("response.output_item.done", { output_index: i, item });
+
+      const responseBody = {
+        id: responseId,
+        object: "response",
+        created_at: Math.floor(Date.now() / 1000),
+        status: "completed",
+        model: effectiveModel,
+        output: finalOutput,
+        usage: {
+          input_tokens: estIn,
+          output_tokens: accumulatedOutTokens || 512,
+          total_tokens: estIn + (accumulatedOutTokens || 512)
+        }
+      };
+
+      sendEvent("response.completed", { response: responseBody });
+      res.write("data: [DONE]\n\n");
+      res.end();
+
+      req._meter.actualOut = accumulatedOutTokens || 512;
+    } catch (err) {
+      console.error("[Proxy] Stream processing error:", err.message);
+      if (!res.headersSent) {
+        res.write(`event: error\n`);
+        res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
+      }
+      res.end();
     }
   }
-
-  sendEvent("response.completed", { response: responseBody });
-  res.write("data: [DONE]\n\n");
-  res.end();
 });
 
 // Start Server — listens only when this file is the entry point (skipped when
