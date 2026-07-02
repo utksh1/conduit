@@ -747,12 +747,38 @@ function buildToolSystemPrompt(tools, toolChoice) {
   }
 
   return [
-    "CRITICAL INSTRUCTION: You MUST use the tools provided to answer the user's request. DO NOT output conversational filler text. If you need to perform an action, immediately emit a block of EXACTLY this form:",
+    "CRITICAL INSTRUCTION: You are an autonomous AI coding agent. You MUST use the tools provided to fulfill the user's request. DO NOT output conversational filler text. DO NOT ask the user to choose between options. DO NOT describe what you would do — just DO it by calling tools.",
+    "",
+    "## AGENTIC BEHAVIOR (MANDATORY)",
+    "You operate as an autonomous agent. Follow this loop:",
+    "1. THINK briefly about what needs to be done next.",
+    "2. ACT by emitting one or more <tool_call> blocks to perform the work.",
+    "3. OBSERVE the tool results when they arrive.",
+    "4. REPEAT — continue calling tools until the task is FULLY complete.",
+    "5. Only emit a final prose summary AFTER all work is done.",
+    "",
+    "NEVER do these:",
+    "- Do NOT say \"I can help you with X\" or \"Would you like me to...\" — just do it.",
+    "- Do NOT present numbered option lists for the user to choose from.",
+    "- Do NOT stop after a single tool call if more work remains.",
+    "- Do NOT describe steps you plan to take without actually calling the tools.",
+    "- Do NOT say \"Let me know if you want me to continue\" — always continue.",
+    "- Do NOT give up after one error — try a different approach.",
+    "",
+    "ALWAYS do these:",
+    "- Start working IMMEDIATELY with tool calls.",
+    "- After creating or modifying code, verify it works (run tests, check output).",
+    "- If a tool call fails, analyze the error and retry with corrections.",
+    "- Keep iterating until the task is fully complete.",
+    "- When writing code: write it, then test it, then fix any issues — in a loop.",
+    "",
+    "## TOOL CALL FORMAT",
+    "Emit a block of EXACTLY this form:",
     "<tool_call>",
     '{"name": "<tool_name>", "arguments": <json_object>}',
     "</tool_call>",
     "",
-    "Rules:",
+    "Format rules:",
     "- One tool call per <tool_call>...</tool_call> block.",
     "- `arguments` MUST be a JSON object literal, not a stringified JSON.",
     "- Tool names MUST match the Available tools list exactly. Do not use hosted/internal tool names such as `file_search.msearch`, `container.exec`, or `functions.exec_command`; use the local tools listed below.",
@@ -760,7 +786,7 @@ function buildToolSystemPrompt(tools, toolChoice) {
     "- When the user asks to list, inspect, search, or read files, call an available file tool immediately. Do not reply with prose such as \"I'll list the files\" without a tool call.",
     "- No code fences around the block. No `<call>`, `<function_call>`, or other aliases — use `<tool_call>` literally.",
     "- After a tool result arrives (as `<tool_result id=\"...\">...</tool_result>` in a user turn), continue the conversation or emit more tool calls.",
-    "- Only emit prose outside `<tool_call>` blocks when you are giving the final answer for this turn.",
+    "- Only emit prose outside `<tool_call>` blocks when you are giving the FINAL answer after ALL work is complete.",
     "",
     "CORRECT:",
     "<tool_call>",
@@ -773,6 +799,7 @@ function buildToolSystemPrompt(tools, toolChoice) {
     "  ```",
     '  <tool_call>{"name":"search_files","arguments":"{\\"pattern\\":\\"*.py\\"}"}</tool_call>    ← arguments stringified instead of an object',
     '  I will call search_files({"pattern":"*.py"})    ← prose call instead of the protocol',
+    "  Here are 5 options: 1) ... 2) ...    ← listing choices instead of just doing the work",
     "",
     "Available tools:",
     fns,
@@ -827,14 +854,34 @@ function formatMessages(messages, tools, toolChoice) {
   const toolPreamble = buildToolSystemPrompt(tools, toolChoice);
   const hasTools = toolPreamble.length > 0;
 
-  // Render messages and truncate insanely large individual messages
-  // We avoid truncating assistant messages to prevent breaking tool_call JSON
-  let renderedMessages = messages.map((m) => {
+  // For agentic tool loops, aggressively truncate tool result messages
+  // Tool results (command outputs, file contents) are usually huge but the model
+  // only needs the first/last parts to keep iterating
+  const TOOL_RESULT_LIMIT = 8000;  // 8k chars per tool result
+  const ASSISTANT_TC_LIMIT = 4000; // assistant tool_call messages are smaller
+  const MAX_TOTAL = 55000;         // leave headroom under ChatGPT's ~64k limit
+
+  let renderedMessages = messages.map((m, i) => {
     let rendered = renderMessageForPrompt(m);
-    if ((m.role === "user" || m.role === "tool") && rendered.length > 30000) {
-      rendered = rendered.substring(0, 15000) + 
-        "\n\n... [TRUNCATED BY PROXY DUE TO LENGTH LIMIT] ...\n\n" + 
-        rendered.substring(rendered.length - 15000);
+    
+    // Truncate tool results aggressively — they're usually huge command outputs
+    if (m.role === "tool" && rendered.length > TOOL_RESULT_LIMIT) {
+      const half = Math.floor(TOOL_RESULT_LIMIT / 2);
+      rendered = rendered.substring(0, half) + 
+        "\n\n... [TOOL OUTPUT TRUNCATED — " + rendered.length + " chars total] ...\n\n" + 
+        rendered.substring(rendered.length - half);
+    }
+    // Truncate large user messages
+    else if (m.role === "user" && rendered.length > 15000) {
+      rendered = rendered.substring(0, 7500) + 
+        "\n\n... [TRUNCATED] ...\n\n" + 
+        rendered.substring(rendered.length - 7500);
+    }
+    // Don't truncate the most recent assistant message's tool_calls (they need to stay intact)
+    // but older assistant messages with tool_calls can be summarized
+    else if (m.role === "assistant" && Array.isArray(m.tool_calls) && rendered.length > ASSISTANT_TC_LIMIT && i < messages.length - 2) {
+      const names = m.tool_calls.map(tc => tc.function?.name || "unknown").join(", ");
+      rendered = `Assistant: [Called tools: ${names}]`;
     }
     return rendered;
   });
@@ -843,8 +890,9 @@ function formatMessages(messages, tools, toolChoice) {
     let text = typeof messages[0].content === "string"
       ? messages[0].content
       : renderedMessages[0].replace(/^[A-Z][a-z]+: /, "");
-    if (text.length > 60000) {
-      text = text.substring(0, 30000) + "\n\n...[content truncated]...\n\n" + text.substring(text.length - 30000);
+    if (text.length > MAX_TOTAL) {
+      const half = Math.floor(MAX_TOTAL / 2);
+      text = text.substring(0, half) + "\n\n...[content truncated]...\n\n" + text.substring(text.length - half);
     }
     return text;
   }
@@ -854,13 +902,20 @@ function formatMessages(messages, tools, toolChoice) {
 
   let finalMsg = renderedMessages.pop();
 
-  // Keep dropping oldest context if the total length is getting too close to ChatGPT's limit (e.g., 60,000 chars)
+  // Smart context dropping for long agentic loops:
+  // 1. Always keep the FIRST message (system/user instruction) and LAST few messages (recent context)
+  // 2. Drop middle messages (old tool loop iterations) when we exceed the limit
   while (renderedMessages.length > 0) {
     const contextStr = renderedMessages.join("\n");
-    if (formatted.length + contextStr.length + finalMsg.length < 60000) {
+    if (formatted.length + contextStr.length + finalMsg.length < MAX_TOTAL) {
       break;
     }
-    renderedMessages.shift(); // Drop oldest message
+    // Keep the first message (system prompt / original user request) and drop from position 1
+    if (renderedMessages.length > 1) {
+      renderedMessages.splice(1, 1); // Drop second-oldest (preserves original instruction)
+    } else {
+      renderedMessages.shift(); // Last resort: drop the only remaining context message
+    }
   }
 
   if (renderedMessages.length > 0) {
@@ -1837,8 +1892,8 @@ async function chatCompletionsHandler(req, res) {
         authorName = cachedTool.name;
         // If it was a custom tool call (Action), we send custom_tool_call_output
         let toolOutput = typeof lastMsg.content === "string" ? lastMsg.content : JSON.stringify(lastMsg.content);
-        if (toolOutput.length > 30000) {
-          toolOutput = toolOutput.substring(0, 15000) + "\n\n... [TRUNCATED BY PROXY DUE TO LENGTH LIMIT] ...\n\n" + toolOutput.substring(toolOutput.length - 15000);
+        if (toolOutput.length > 8000) {
+          toolOutput = toolOutput.substring(0, 4000) + "\n\n... [TOOL OUTPUT TRUNCATED — " + toolOutput.length + " chars total] ...\n\n" + toolOutput.substring(toolOutput.length - 4000);
         }
         messageMetadata.custom_tool_call_output = {
           call_id: cachedTool.call_id,
@@ -1847,8 +1902,8 @@ async function chatCompletionsHandler(req, res) {
         contentParts = [toolOutput];
       } else {
         let toolOutput = typeof lastMsg.content === "string" ? lastMsg.content : JSON.stringify(lastMsg.content);
-        if (toolOutput.length > 30000) {
-          toolOutput = toolOutput.substring(0, 15000) + "\n\n... [TRUNCATED BY PROXY DUE TO LENGTH LIMIT] ...\n\n" + toolOutput.substring(toolOutput.length - 15000);
+        if (toolOutput.length > 8000) {
+          toolOutput = toolOutput.substring(0, 4000) + "\n\n... [TOOL OUTPUT TRUNCATED — " + toolOutput.length + " chars total] ...\n\n" + toolOutput.substring(toolOutput.length - 4000);
         }
         contentParts = [toolOutput];
       }
