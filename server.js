@@ -2038,6 +2038,7 @@ async function chatCompletionsHandler(req, res) {
       let lastText = "";
       let buffer = "";
       let bufferedFull = ""; // used when hasPromptTools — we can't stream tokens through a tool parser
+      let flushedTextLength = 0; // Tracks how much of bufferedFull has been streamed as prose
       let streamAnnotations = []; // URL citations from native search
       let activeStreamingToolCall = null;
       let latestMessageId = null;
@@ -2112,18 +2113,21 @@ async function chatCompletionsHandler(req, res) {
               console.log(`[Proxy] Raw stream text:`, bufferedFull);
               console.log(`[Proxy] Extracted ${toolCalls.length} tool calls.`);
               const finalModel = upstreamModelSlug || targetModel;
+              
+              if (cleanedText && cleanedText.length > flushedTextLength) {
+                const remainingProse = cleanedText.slice(flushedTextLength);
+                safeWrite(`data: ${JSON.stringify({
+                  id: completionId,
+                  object: "chat.completion.chunk",
+                  created: Math.floor(Date.now() / 1000),
+                  model: finalModel,
+                  choices: [{ index: 0, delta: { content: remainingProse }, finish_reason: null }]
+                })}\n\n`);
+              }
+
               if (toolCalls.length > 0) {
                 emitChatToolCalls(safeWrite, completionId, finalModel, toolCalls);
               } else {
-                if (cleanedText) {
-                  safeWrite(`data: ${JSON.stringify({
-                    id: completionId,
-                    object: "chat.completion.chunk",
-                    created: Math.floor(Date.now() / 1000),
-                    model: finalModel,
-                    choices: [{ index: 0, delta: { content: cleanedText }, finish_reason: null }]
-                  })}\n\n`);
-                }
                 safeWrite(`data: ${JSON.stringify({
                   id: completionId,
                   object: "chat.completion.chunk",
@@ -2277,11 +2281,49 @@ async function chatCompletionsHandler(req, res) {
                   if (delta) {
                     if (hasPromptTools) {
                       bufferedFull = currentText;
+                      
+                      let safeIndex = bufferedFull.length;
+                      const tags = ["<tool_call>", "<call>", "<function_call>", "<tool>", "```json", "```"];
+                      for (const tag of tags) {
+                        const idx = bufferedFull.indexOf(tag);
+                        if (idx !== -1 && idx < safeIndex) {
+                          safeIndex = idx;
+                        }
+                      }
+                      
+                      if (safeIndex === bufferedFull.length) {
+                        safeIndex = Math.max(0, bufferedFull.length - 15);
+                      }
+                      
+                      if (safeIndex > flushedTextLength) {
+                        const proseDelta = bufferedFull.slice(flushedTextLength, safeIndex);
+                        flushedTextLength = safeIndex;
+                        safeWrite(`data: ${JSON.stringify({
+                          id: completionId,
+                          object: "chat.completion.chunk",
+                          created: Math.floor(Date.now() / 1000),
+                          model: upstreamModelSlug || targetModel,
+                          choices: [{ index: 0, delta: { content: proseDelta }, finish_reason: null }]
+                        })}\n\n`);
+                      }
+
                       if (shouldTryEarlyToolExtraction(bufferedFull)) {
                         const allowedNames = new Set(promptEngineeredTools.map(t => t.function?.name).filter(Boolean));
-                        const { toolCalls } = extractToolCalls(bufferedFull, allowedNames);
+                        const { toolCalls, cleanedText } = extractToolCalls(bufferedFull, allowedNames);
                         if (toolCalls.length > 0) {
                           const finalModel = upstreamModelSlug || targetModel;
+                          
+                          if (cleanedText && cleanedText.length > flushedTextLength) {
+                            const remainingProse = cleanedText.slice(flushedTextLength);
+                            safeWrite(`data: ${JSON.stringify({
+                              id: completionId,
+                              object: "chat.completion.chunk",
+                              created: Math.floor(Date.now() / 1000),
+                              model: finalModel,
+                              choices: [{ index: 0, delta: { content: remainingProse }, finish_reason: null }]
+                            })}\n\n`);
+                          }
+                          
                           emitChatToolCalls(safeWrite, completionId, finalModel, toolCalls);
                           safeWrite("data: [DONE]\n\n");
                           req._meter.actualOut = estimateTokens(JSON.stringify(toolCalls));
