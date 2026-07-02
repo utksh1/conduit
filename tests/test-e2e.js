@@ -3,7 +3,7 @@
  * Tests: health, streaming, tool calling, multi-turn tool loops, large message truncation
  */
 
-const BASE_URL = "https://chatgpt-to-api-oliw.onrender.com";
+const BASE_URL = "http://localhost:10000";
 const API_KEY = process.env.PROXY_API_KEY || "";
 
 const headers = {

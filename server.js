@@ -961,7 +961,8 @@ function formatMessages(messages, tools, toolChoice) {
  */
 function enforceThinkingForTools(requestedModel, hasTools) {
   if (!hasTools) return requestedModel;
-  if (process.env.TOOL_FORCE_THINKING === "false") return requestedModel;
+  // Default to FALSE because thinking models now require stream_handoff (WebSockets)
+  if (process.env.TOOL_FORCE_THINKING !== "true") return requestedModel;
   const m = (requestedModel || "").toLowerCase();
   // Already a thinking/reasoning model — leave it alone.
   if (m.includes("thinking") || m.includes("reasoning") || m === "o3" || m === "o4" || m.startsWith("o1")) {
@@ -1492,10 +1493,27 @@ function categorizeMessage(parsed) {
   const role = message.author.role;
   const authorName = message.author.name || "";
   const contentParts = message.content?.parts || [];
-  // Fix #6: Join all string parts instead of only reading parts[0]
-  const text = contentParts.filter(p => typeof p === "string").join("") || "";
   const metadata = message.metadata || {};
   const recipient = message.recipient || "all";
+
+  // Debug: see what ChatGPT is actually sending
+  console.log(`[Proxy-Debug] MSG role=${role}, authorName=${authorName}, is_inner_monologue=${metadata.is_inner_monologue}, msg_type=${metadata.message_type}, contentParts=`, JSON.stringify(contentParts).slice(0, 500));
+
+  // Fix #6: Join all parts correctly, handling both strings and objects (from thinking models)
+  let text = "";
+  if (authorName !== "thinking" && !metadata.is_inner_monologue && metadata.message_type !== "thinking" && role === "assistant") {
+    // console.log(`[Proxy-Debug] contentParts for non-thinking assistant msg:`, JSON.stringify(contentParts));
+  }
+  for (const p of contentParts) {
+    if (typeof p === "string") {
+      text += p;
+    } else if (p && typeof p.text === "string" && !p.content_type?.includes("thinking")) {
+      text += p.text;
+    }
+  }
+
+  // Debug: log EVERY message from the backend to see where the tool call is hiding
+  // console.log(`[Proxy-Debug-All] role=${role}, author=${authorName}, inner=${metadata.is_inner_monologue}, type=${metadata.message_type}, text_len=${text.length}, text=${text.slice(0, 100).replace(/\n/g, '\\n')}`);
 
   // Fix #4: Filter out thinking/reasoning inner monologue from thinking models
   if (metadata.is_inner_monologue || authorName === "thinking" || metadata.message_type === "thinking") {
@@ -2502,7 +2520,12 @@ async function chatCompletionsHandler(req, res) {
       let collectedToolCalls = [];
 
       for await (const chunk of response.body) {
-        buffer += new TextDecoder().decode(chunk);
+        const decoded = new TextDecoder().decode(chunk);
+        // Debug raw response
+        if (requestedModel.includes("thinking") && !stream) {
+           console.log(`[Proxy-Raw] ${decoded.slice(0, 500).replace(/\n/g, '\\n')}`);
+        }
+        buffer += decoded;
         const lines = buffer.split("\n");
         buffer = lines.pop();
 
