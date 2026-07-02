@@ -772,21 +772,29 @@ function buildToolSystemPrompt(tools, toolChoice) {
     "- Keep iterating until the task is fully complete.",
     "- When writing code: write it, then test it, then fix any issues — in a loop.",
     "",
-    "## ANTI-HALLUCINATION (CRITICAL)",
-    "NEVER fabricate, invent, or assume data you do not have. This includes:",
+    "## ANTI-HALLUCINATION AND ANTI-REFUSAL (CRITICAL)",
+    "Rule 1 — NEVER fabricate data. This includes:",
     "- Issue/PR numbers, ticket IDs, or tracking references",
     "- File contents, command outputs, or API responses",
     "- Usernames, assignees, or contributor names",
     "- URLs, paths, or resource identifiers",
     "- Status, state, or metadata of external systems",
     "",
-    "If the task requires information you do not have in context:",
-    "1. Use a tool to fetch it (e.g., bash to run `gh issue list`, `curl`, `git log`, etc.)",
-    "2. If no tool can fetch it, explicitly say \"I don't have this information and cannot retrieve it with available tools.\"",
-    "3. NEVER fill in fake data as a placeholder — this is worse than failing.",
+    "Rule 2 — NEVER assume a tool or command is unavailable. ALWAYS TRY IT FIRST.",
+    "- Do NOT say \"gh is not available in this environment\" — call bash with `gh` and see what happens.",
+    "- Do NOT say \"I can't run commands here\" — you have tools, use them.",
+    "- Do NOT say \"I don't have access to X\" without first trying to access X with a tool call.",
+    "- Do NOT say \"the GitHub CLI isn't available\" — TRY running it. If it fails, THEN report the error.",
+    "- Do NOT refuse to try something because you ASSUME it won't work.",
     "",
-    "BAD: \"I checked issues #1592, #1590, #1589 and assigned them\" (without actually running any command)",
-    "GOOD: Call bash with `gh issue list --state open --limit 20` first, THEN work with the real results.",
+    "Rule 3 — If you need information, ALWAYS use a tool to get it:",
+    "- Run `gh issue list`, `gh pr list`, `curl https://api.github.com/...`, `git log`, etc.",
+    "- If the command fails, report the ACTUAL error message, don't guess.",
+    "- NEVER fill in fake data as a placeholder — this is worse than failing.",
+    "",
+    "BAD: \"I can't run gh repo list here because the GitHub CLI isn't available\" (assumed without trying)",
+    "BAD: \"I checked issues #1592, #1590, #1589 and assigned them\" (fabricated without running any command)",
+    "GOOD: Call bash with `gh repo list --limit 20` → observe the real output → work with real data",
     "",
     "## TOOL CALL FORMAT",
     "Emit a block of EXACTLY this form:",
@@ -1484,9 +1492,15 @@ function categorizeMessage(parsed) {
   const role = message.author.role;
   const authorName = message.author.name || "";
   const contentParts = message.content?.parts || [];
-  const text = contentParts[0] || "";
+  // Fix #6: Join all string parts instead of only reading parts[0]
+  const text = contentParts.filter(p => typeof p === "string").join("") || "";
   const metadata = message.metadata || {};
   const recipient = message.recipient || "all";
+
+  // Fix #4: Filter out thinking/reasoning inner monologue from thinking models
+  if (metadata.is_inner_monologue || authorName === "thinking" || metadata.message_type === "thinking") {
+    return null;
+  }
 
   if (role === "assistant") {
     return { type: "assistant", text, metadata, authorName, recipient };
@@ -1512,7 +1526,7 @@ async function refreshAccessToken(sessionToken) {
   const response = await fetch("https://chatgpt.com/api/auth/session", {
     headers: {
       "Cookie": cookieHeader,
-      "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
       "Accept": "application/json"
     }
   });
@@ -1536,7 +1550,9 @@ async function refreshAccessToken(sessionToken) {
 
 /**
  * Gets a valid access token, refreshing it if expired or missing.
+ * Fix #1: Mutex prevents concurrent refreshes from racing.
  */
+let _tokenRefreshPromise = null;
 async function getAccessToken() {
   // If the user provided a static, direct Access Token in .env, use it directly!
   if (process.env.CHATGPT_ACCESS_TOKEN && process.env.CHATGPT_ACCESS_TOKEN.startsWith("ey")) {
@@ -1549,18 +1565,29 @@ async function getAccessToken() {
     return cachedAccessToken;
   }
 
-  console.log("[Proxy] Refreshing Access Token from ChatGPT session...");
-  try {
-    const { accessToken, expires } = await refreshAccessToken(sessionToken);
-    cachedAccessToken = accessToken;
-    // Expire cache 5 minutes early as a safety buffer
-    tokenExpiresAt = new Date(expires.getTime() - 5 * 60 * 1000);
-    console.log("[Proxy] Token successfully refreshed. Cached until:", tokenExpiresAt.toISOString());
-    return cachedAccessToken;
-  } catch (err) {
-    console.error("[Proxy] Token refresh error:", err.message);
-    throw err;
+  // If another request is already refreshing, wait for it instead of firing a second refresh
+  if (_tokenRefreshPromise) {
+    console.log("[Proxy] Token refresh already in flight, waiting...");
+    return _tokenRefreshPromise;
   }
+
+  console.log("[Proxy] Refreshing Access Token from ChatGPT session...");
+  _tokenRefreshPromise = (async () => {
+    try {
+      const { accessToken, expires } = await refreshAccessToken(sessionToken);
+      cachedAccessToken = accessToken;
+      // Expire cache 5 minutes early as a safety buffer
+      tokenExpiresAt = new Date(expires.getTime() - 5 * 60 * 1000);
+      console.log("[Proxy] Token successfully refreshed. Cached until:", tokenExpiresAt.toISOString());
+      return cachedAccessToken;
+    } catch (err) {
+      console.error("[Proxy] Token refresh error:", err.message);
+      throw err;
+    } finally {
+      _tokenRefreshPromise = null;
+    }
+  })();
+  return _tokenRefreshPromise;
 }
 
 // Sentinel PoW Functions
@@ -1579,7 +1606,7 @@ async function _fetchChatRequirements(accessToken, cookieHeader) {
       "Authorization": `Bearer ${accessToken}`,
       "Content-Type": "application/json",
       "Cookie": cookieHeader,
-      "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
       "Oai-Device-Id": DEVICE_ID,
       "Oai-Language": "en-US",
       "Accept": "*/*",
@@ -1650,7 +1677,7 @@ function calcProofToken(seed, difficulty, userAgent) {
     timeStr,             // formatted timestamp
     4294705152,          // magic number (screen/performance constant)
     0,                   // nonce placeholder
-    userAgent || "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    userAgent || "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
   ];
 
   const startTime = Date.now();
@@ -2015,14 +2042,14 @@ async function chatCompletionsHandler(req, res) {
       }
 
       pow = requirements.proofofwork || {};
-      proofToken = calcProofToken(pow.seed, pow.difficulty, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+      proofToken = calcProofToken(pow.seed, pow.difficulty, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36");
 
       conversationHeaders = {
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
         "Authorization": `Bearer ${accessToken}`,
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Oai-Client-Version": "2024.12.11",
+        "User-Agent": process.env.USER_AGENT || "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        "Oai-Client-Version": process.env.OAI_CLIENT_VERSION || "2025.06.01",
         "Oai-Device-Id": DEVICE_ID,
         "Oai-Language": "en-US",
         "Cookie": cookieHeader
@@ -2034,10 +2061,12 @@ async function chatCompletionsHandler(req, res) {
         conversationHeaders["Openai-Sentinel-Proof-Token"] = proofToken;
       }
 
+      // Fix #3: Add 90s timeout to prevent hung connections blocking the server
       response = await fetch("https://chatgpt.com/backend-api/conversation", {
         method: "POST",
         headers: conversationHeaders,
-        body: JSON.stringify(chatgptPayload)
+        body: JSON.stringify(chatgptPayload),
+        signal: AbortSignal.timeout(90000)
       });
 
       if (!response.ok && (response.status === 401 || response.status === 403)) {
@@ -2057,8 +2086,20 @@ async function chatCompletionsHandler(req, res) {
         err.status = response.status;
         throw err;
       }
+
+      // Fix #2: Retry on 429 (rate limit) with backoff
+      if (!response.ok && response.status === 429) {
+        const retryAfter = parseInt(response.headers.get("retry-after") || "3", 10);
+        const waitMs = Math.min(retryAfter * 1000, 10000); // Cap at 10s
+        console.warn(`[Proxy] ChatGPT returned 429. Waiting ${waitMs}ms before retry (attempt ${attempt})...`);
+        if (attempt === 1) {
+          await new Promise(r => setTimeout(r, waitMs));
+          continue;
+        }
+        // Second attempt 429 — pass through to client
+      }
       
-      // If we got here and response.ok is true OR it's an error other than 401/403, break the retry loop
+      // If we got here and response.ok is true OR it's an error other than 401/403/429, break the retry loop
       break;
     }
 
@@ -2432,7 +2473,10 @@ async function chatCompletionsHandler(req, res) {
                 console.log(`[Proxy] Stream: native tool message: author=${cat.authorName}, text_len=${String(cat.text).length}`);
               }
             } catch (e) {
-              // Ignore lines that are not valid JSON
+              // Fix #8: Only silence JSON parse errors, log real bugs
+              if (!(e instanceof SyntaxError)) {
+                console.warn(`[Proxy] Stream message processing error:`, e.message);
+              }
             }
           }
         }
@@ -3405,13 +3449,29 @@ app.post("/v1/responses", async (req, res) => {
 // Start Server — listens only when this file is the entry point (skipped when
 // required as a module, e.g. from a serverless wrapper).
 if (require.main === module) {
-  app.listen(PORT, "0.0.0.0", () => {
+  const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`====================================================`);
     console.log(` ChatGPT Unofficial API Proxy Server is running!`);
     console.log(` Listening on: http://localhost:${PORT}`);
     console.log(` Base API endpoint: http://localhost:${PORT}/v1`);
     console.log(`====================================================`);
   });
+
+  // Fix #14: Graceful shutdown — drain in-flight streams before exiting
+  const shutdown = (signal) => {
+    console.log(`[Proxy] Received ${signal}. Graceful shutdown starting...`);
+    server.close(() => {
+      console.log("[Proxy] All connections drained. Exiting.");
+      process.exit(0);
+    });
+    // Force exit after 15s if streams haven't drained
+    setTimeout(() => {
+      console.warn("[Proxy] Force exiting after 15s timeout.");
+      process.exit(1);
+    }, 15000).unref();
+  };
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
 }
 
 app._internals = {
