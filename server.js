@@ -821,39 +821,56 @@ function renderMessageForPrompt(msg) {
   return `${role}: ${content}`;
 }
 
-/**
- * Formats a stateless list of OpenAI-style messages into a single, cohesive
- * prompt suitable for ChatGPT's single-node conversation format.
- *
- * When `tools` is provided, prepends a system preamble describing the
- * <tool_call> protocol and rewrites assistant tool_calls / tool results into
- * the same wire format so the conversation stays coherent.
- */
 function formatMessages(messages, tools, toolChoice) {
   if (!messages || messages.length === 0) return "";
 
   const toolPreamble = buildToolSystemPrompt(tools, toolChoice);
   const hasTools = toolPreamble.length > 0;
 
+  // Render messages and truncate insanely large individual messages
+  // We avoid truncating assistant messages to prevent breaking tool_call JSON
+  let renderedMessages = messages.map((m) => {
+    let rendered = renderMessageForPrompt(m);
+    if ((m.role === "user" || m.role === "tool") && rendered.length > 30000) {
+      rendered = rendered.substring(0, 15000) + 
+        "\n\n... [TRUNCATED BY PROXY DUE TO LENGTH LIMIT] ...\n\n" + 
+        rendered.substring(rendered.length - 15000);
+    }
+    return rendered;
+  });
+
   if (messages.length === 1 && !hasTools) {
-    return typeof messages[0].content === "string"
+    let text = typeof messages[0].content === "string"
       ? messages[0].content
-      : renderMessageForPrompt(messages[0]).replace(/^[A-Z][a-z]+: /, "");
+      : renderedMessages[0].replace(/^[A-Z][a-z]+: /, "");
+    if (text.length > 60000) {
+      text = text.substring(0, 30000) + "\n\n...[content truncated]...\n\n" + text.substring(text.length - 30000);
+    }
+    return text;
   }
 
   let formatted = "";
   if (hasTools) formatted += `[Tool Protocol]\n${toolPreamble}\n\n`;
 
-  for (let i = 0; i < messages.length; i++) {
-    const rendered = renderMessageForPrompt(messages[i]);
-    if (i === messages.length - 1) {
-      formatted += `\n[Current Instruction]\n${rendered}`;
-    } else {
-      if (i === 0 && !hasTools) formatted += `[Conversation Context]\n`;
-      else if (i === 0) formatted += `[Conversation Context]\n`;
-      formatted += `${rendered}\n`;
+  let finalMsg = renderedMessages.pop();
+
+  // Keep dropping oldest context if the total length is getting too close to ChatGPT's limit (e.g., 60,000 chars)
+  while (renderedMessages.length > 0) {
+    const contextStr = renderedMessages.join("\n");
+    if (formatted.length + contextStr.length + finalMsg.length < 60000) {
+      break;
+    }
+    renderedMessages.shift(); // Drop oldest message
+  }
+
+  if (renderedMessages.length > 0) {
+    formatted += `[Conversation Context]\n`;
+    for (let i = 0; i < renderedMessages.length; i++) {
+      formatted += `${renderedMessages[i]}\n`;
     }
   }
+
+  formatted += `\n[Current Instruction]\n${finalMsg}`;
   return formatted;
 }
 
@@ -1819,15 +1836,29 @@ async function chatCompletionsHandler(req, res) {
       if (cachedTool) {
         authorName = cachedTool.name;
         // If it was a custom tool call (Action), we send custom_tool_call_output
+        let toolOutput = typeof lastMsg.content === "string" ? lastMsg.content : JSON.stringify(lastMsg.content);
+        if (toolOutput.length > 30000) {
+          toolOutput = toolOutput.substring(0, 15000) + "\n\n... [TRUNCATED BY PROXY DUE TO LENGTH LIMIT] ...\n\n" + toolOutput.substring(toolOutput.length - 15000);
+        }
         messageMetadata.custom_tool_call_output = {
           call_id: cachedTool.call_id,
-          output: typeof lastMsg.content === "string" ? lastMsg.content : JSON.stringify(lastMsg.content)
+          output: toolOutput
         };
+        contentParts = [toolOutput];
+      } else {
+        let toolOutput = typeof lastMsg.content === "string" ? lastMsg.content : JSON.stringify(lastMsg.content);
+        if (toolOutput.length > 30000) {
+          toolOutput = toolOutput.substring(0, 15000) + "\n\n... [TRUNCATED BY PROXY DUE TO LENGTH LIMIT] ...\n\n" + toolOutput.substring(toolOutput.length - 15000);
+        }
+        contentParts = [toolOutput];
       }
-      contentParts = [typeof lastMsg.content === "string" ? lastMsg.content : JSON.stringify(lastMsg.content)];
     } else {
       // User message
-      contentParts = [typeof lastMsg.content === "string" ? lastMsg.content : JSON.stringify(lastMsg.content)];
+      let userOutput = typeof lastMsg.content === "string" ? lastMsg.content : JSON.stringify(lastMsg.content);
+      if (userOutput.length > 30000) {
+        userOutput = userOutput.substring(0, 15000) + "\n\n... [USER MESSAGE TRUNCATED BY PROXY DUE TO LENGTH LIMIT] ...\n\n" + userOutput.substring(userOutput.length - 15000);
+      }
+      contentParts = [userOutput];
     }
 
     chatgptPayload = {
