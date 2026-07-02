@@ -742,6 +742,8 @@ function buildToolSystemPrompt(tools, toolChoice) {
     toolChoice.function?.name
   ) {
     choiceHint = `\nCRITICAL: You MUST call the tool \`${toolChoice.function.name}\` in your reply. Do not output anything else.`;
+  } else {
+    choiceHint = "\nCRITICAL: If the user requests an action, you MUST emit a <tool_call> block to perform it. Do not hallucinate success without calling the tool.";
   }
 
   return [
@@ -1501,7 +1503,9 @@ async function _fetchChatRequirements(accessToken, cookieHeader) {
   if (!resp.ok) {
     const errText = await resp.text();
     console.error('[Proxy] Sentinel requirements fetch error', resp.status, errText.slice(0, 800).replace(/\s+/g, ' '));
-    throw new Error(`Sentinel requirements fetch failed: ${resp.status}`);
+    const error = new Error(`Sentinel requirements fetch failed: ${resp.status}`);
+    error.status = resp.status;
+    throw error;
   }
   return resp.json();
 }
@@ -1922,6 +1926,13 @@ async function chatCompletionsHandler(req, res) {
     if (!response.ok) {
       const errText = await response.text();
       console.error(`[Proxy] ChatGPT returned error ${response.status}:`, errText);
+      
+      if (response.status === 401 || response.status === 403) {
+        cachedAccessToken = null;
+        tokenExpiresAt = null;
+        console.log("[Proxy] Cleared cached access token due to 401/403 upstream error.");
+      }
+      
       if (req._meter) {
         req._meter.errorCode = "upstream_error";
         req._meter.errorMessage = errText.slice(0, 1000);
@@ -2432,6 +2443,22 @@ async function chatCompletionsHandler(req, res) {
 
   } catch (err) {
     console.error("[Proxy] Unexpected server error during fetch:", err.message);
+
+    if (err.status === 401 || err.status === 403 || err.message.includes("401") || err.message.includes("403")) {
+      cachedAccessToken = null;
+      tokenExpiresAt = null;
+      console.log("[Proxy] Cleared cached access token due to 401/403 error.");
+      if (!res.headersSent) {
+        return res.status(401).json({
+          error: {
+            message: `ChatGPT access token expired or invalid (${err.status || 401}). Cache cleared. Please retry.`,
+            type: "invalid_request_error",
+            code: "token_expired"
+          }
+        });
+      }
+    }
+
     if (req._meter) {
       req._meter.errorCode = "internal_server_error";
       req._meter.errorMessage = err.message;
