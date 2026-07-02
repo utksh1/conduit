@@ -1895,44 +1895,74 @@ async function chatCompletionsHandler(req, res) {
 
   try {
     const cookieHeader = process.env.CHATGPT_COOKIES || `__Secure-next-auth.session-token=${process.env.CHATGPT_SESSION_TOKEN}`;
-    // Retrieve Sentinel requirements and compute PoW proof token
-    const requirements = await getChatRequirements(accessToken, cookieHeader);
-    const pow = requirements.proofofwork || {};
-    const proofToken = calcProofToken(pow.seed, pow.difficulty, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+    let requirements, pow, proofToken, conversationHeaders, response;
+    
+    // We'll wrap the fetch process in a loop to retry once on 401/403 token expiration.
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        requirements = await getChatRequirements(accessToken, cookieHeader);
+      } catch (reqErr) {
+        if ((reqErr.status === 401 || reqErr.status === 403) && attempt === 1) {
+          console.warn("[Proxy] Token failed during Sentinel fetch. Invalidating cache and retrying...");
+          cachedAccessToken = null;
+          tokenExpiresAt = null;
+          accessToken = await getAccessToken(); // Fetch fresh token
+          continue;
+        }
+        throw reqErr;
+      }
 
-    const conversationHeaders = {
-      "Content-Type": "application/json",
-      "Accept": "text/event-stream",
-      "Authorization": `Bearer ${accessToken}`,
-      "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      "Oai-Client-Version": "2024.12.11",
-      "Oai-Device-Id": DEVICE_ID,
-      "Oai-Language": "en-US",
-      "Cookie": cookieHeader
-    };
-    if (requirements.token) {
-      conversationHeaders["Openai-Sentinel-Chat-Requirements-Token"] = requirements.token;
-    }
-    if (proofToken) {
-      conversationHeaders["Openai-Sentinel-Proof-Token"] = proofToken;
-    }
+      pow = requirements.proofofwork || {};
+      proofToken = calcProofToken(pow.seed, pow.difficulty, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
 
-    const response = await fetch("https://chatgpt.com/backend-api/conversation", {
-      method: "POST",
-      headers: conversationHeaders,
-      body: JSON.stringify(chatgptPayload)
-    });
+      conversationHeaders = {
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+        "Authorization": `Bearer ${accessToken}`,
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Oai-Client-Version": "2024.12.11",
+        "Oai-Device-Id": DEVICE_ID,
+        "Oai-Language": "en-US",
+        "Cookie": cookieHeader
+      };
+      if (requirements.token) {
+        conversationHeaders["Openai-Sentinel-Chat-Requirements-Token"] = requirements.token;
+      }
+      if (proofToken) {
+        conversationHeaders["Openai-Sentinel-Proof-Token"] = proofToken;
+      }
+
+      response = await fetch("https://chatgpt.com/backend-api/conversation", {
+        method: "POST",
+        headers: conversationHeaders,
+        body: JSON.stringify(chatgptPayload)
+      });
+
+      if (!response.ok && (response.status === 401 || response.status === 403)) {
+        const errText = await response.text();
+        console.error(`[Proxy] ChatGPT returned error ${response.status}:`, errText);
+        cachedAccessToken = null;
+        tokenExpiresAt = null;
+        
+        if (attempt === 1) {
+          console.warn("[Proxy] Upstream 401/403. Cleared cached access token. Retrying...");
+          accessToken = await getAccessToken(); // Fetch fresh token
+          continue;
+        }
+        
+        // If it's the second attempt, throw to be caught by the outer catch block
+        const err = new Error(`ChatGPT API Error: ${errText}`);
+        err.status = response.status;
+        throw err;
+      }
+      
+      // If we got here and response.ok is true OR it's an error other than 401/403, break the retry loop
+      break;
+    }
 
     if (!response.ok) {
       const errText = await response.text();
       console.error(`[Proxy] ChatGPT returned error ${response.status}:`, errText);
-      
-      if (response.status === 401 || response.status === 403) {
-        cachedAccessToken = null;
-        tokenExpiresAt = null;
-        console.log("[Proxy] Cleared cached access token due to 401/403 upstream error.");
-      }
-      
       if (req._meter) {
         req._meter.errorCode = "upstream_error";
         req._meter.errorMessage = errText.slice(0, 1000);
