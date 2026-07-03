@@ -1515,9 +1515,9 @@ function categorizeMessage(parsed) {
   // Debug: log EVERY message from the backend to see where the tool call is hiding
   // console.log(`[Proxy-Debug-All] role=${role}, author=${authorName}, inner=${metadata.is_inner_monologue}, type=${metadata.message_type}, text_len=${text.length}, text=${text.slice(0, 100).replace(/\n/g, '\\n')}`);
 
-  // Fix #4: Filter out thinking/reasoning inner monologue from thinking models
+  // Pass thinking/reasoning inner monologue through as a "thinking" message
   if (metadata.is_inner_monologue || authorName === "thinking" || metadata.message_type === "thinking") {
-    return null;
+    return { type: "thinking", text, metadata, authorName, recipient };
   }
 
   if (role === "assistant") {
@@ -2173,6 +2173,7 @@ async function chatCompletionsHandler(req, res) {
       let activeStreamingToolCall = null;
       let latestMessageId = null;
       let latestConversationId = null;
+      let lastThinkingText = "";
 
       try {
       for await (const chunk of response.body) {
@@ -2296,7 +2297,7 @@ async function chatCompletionsHandler(req, res) {
               }
             }
             safeWrite("data: [DONE]\n\n");
-            req._meter.actualOut = estimateTokens(lastText);
+            req._meter.actualOut = estimateTokens(lastText) + estimateTokens(lastThinkingText);
             if (!clientDisconnected) res.end();
             return;
           }
@@ -2323,7 +2324,32 @@ async function chatCompletionsHandler(req, res) {
 
               const cat = categorizeMessage(parsed);
 
-              if (cat?.type === "assistant") {
+              if (cat?.type === "thinking") {
+                const currentThinkingText = cat.text || "";
+                if (currentThinkingText && currentThinkingText.startsWith(lastThinkingText)) {
+                  const thinkingDelta = currentThinkingText.slice(lastThinkingText.length);
+                  lastThinkingText = currentThinkingText;
+                  
+                  if (thinkingDelta) {
+                    const chunkPayload = {
+                      id: completionId,
+                      object: "chat.completion.chunk",
+                      created: Math.floor(Date.now() / 1000),
+                      model: upstreamModelSlug || targetModel,
+                      choices: [
+                        {
+                          index: 0,
+                          delta: {
+                            reasoning_content: thinkingDelta
+                          },
+                          finish_reason: null
+                        }
+                      ]
+                    };
+                    safeWrite(`data: ${JSON.stringify(chunkPayload)}\n\n`);
+                  }
+                }
+              } else if (cat?.type === "assistant") {
                 // Check if it's a client-side tool call
                 if (cat.recipient && cat.recipient !== "all" && !SERVER_TOOLS.has(cat.recipient)) {
                   const allowedNames = allowedToolNameSet(promptEngineeredTools);
@@ -2512,6 +2538,7 @@ async function chatCompletionsHandler(req, res) {
     } else {
       // 6. Non-Streaming Response Handling
       let fullContent = "";
+      let fullThinkingContent = "";
       let buffer = "";
       let nativeToolOutputs = []; // Collect native tool messages (browser, python, etc.)
       let collectedAnnotations = []; // URL citations from native search
@@ -2553,7 +2580,9 @@ async function chatCompletionsHandler(req, res) {
                 null;
 
               const cat = categorizeMessage(parsed);
-              if (cat?.type === "assistant") {
+              if (cat?.type === "thinking") {
+                fullThinkingContent = cat.text || fullThinkingContent;
+              } else if (cat?.type === "assistant") {
                 // Check if it's a client-side tool call
                 if (cat.recipient && cat.recipient !== "all" && !SERVER_TOOLS.has(cat.recipient)) {
                   const toolCallId = "call_" + parsed.message.id;
@@ -2602,6 +2631,9 @@ async function chatCompletionsHandler(req, res) {
       }
 
       const assistantMsg = { role: "assistant", content: null };
+      if (fullThinkingContent) {
+        assistantMsg.reasoning_content = fullThinkingContent;
+      }
       let finishReason = "stop";
 
       if (collectedToolCalls.length > 0) {
