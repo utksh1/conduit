@@ -382,4 +382,4 @@ The following are explicitly **NOT** in scope for this version:
 
 ### References
 - Chimera Project: `/Users/Utkarsh/Documents/chimera`
-- Original Node.js Implementation: `/Users/Utkarsh/Documents/chatgpt-to-api`
+- Original Node.js Implementation: `/Users/Utkarsh/Documents/conduit`

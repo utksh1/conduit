@@ -287,6 +287,19 @@ function KeyEditor({
 }
 
 function RevealModal({ open, onClose, reveal }: { open: boolean; onClose: () => void; reveal: { key: ApiKey; secret: string } | null }) {
+  const [copied, setCopied] = useState(false);
+
+  // Reset copied state when modal opens/closes
+  useState(() => setCopied(false));
+
+  const handleCopy = () => {
+    if (reveal) {
+      navigator.clipboard.writeText(reveal.secret);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
+
   if (!reveal) return null;
   return (
     <Modal open={open} onClose={onClose} title="Copy your key now">
@@ -295,7 +308,9 @@ function RevealModal({ open, onClose, reveal }: { open: boolean; onClose: () => 
       </p>
       <div className="flex gap-2">
         <Input value={reveal.secret} readOnly className="font-mono text-xs" onFocus={(e) => e.currentTarget.select()} />
-        <Button onClick={() => navigator.clipboard.writeText(reveal.secret)}><Copy size={14} /> Copy</Button>
+        <Button onClick={handleCopy}>
+          <Copy size={14} /> {copied ? "Copied!" : "Copy"}
+        </Button>
       </div>
       <div className="flex justify-end mt-4">
         <Button variant="secondary" onClick={onClose}>Done</Button>

@@ -1,32 +1,20 @@
 services:
   - type: web
-    name: chatgpt-to-api
-    runtime: node
-    plan: free
-    region: oregon
-    repo: https://github.com/utksh1/chatgpt-to-api
-    branch: main
-    buildCommand: npm install
-    startCommand: npm start
-    healthCheckPath: /ping
+    name: chatgpt-proxy-rust
+    runtime: docker
+    dockerfilePath: ./Dockerfile
     envVars:
-      - key: NODE_VERSION
-        value: "20"
-      - key: PORT
-        value: "10000"
-      - key: DEFAULT_MODEL
-        value: gpt-5-5-instant
-      - key: TOOL_FORCE_THINKING
-        value: "false"
-      - key: PROXY_API_KEY
-        sync: false
-      - key: CHATGPT_ACCESS_TOKEN
-        sync: false
       - key: CHATGPT_SESSION_TOKEN
         sync: false
-      - key: CHATGPT_COOKIES
+      - key: PORT
+        value: 3040
+      - key: HOST
+        value: 0.0.0.0
+      - key: PROXY_API_KEY
         sync: false
-      - key: SUPABASE_URL
-        sync: false
-      - key: SUPABASE_SERVICE_ROLE_KEY
-        sync: false
+      - key: ALLOWED_DIRECTORIES
+        value: /tmp
+      - key: ALLOWED_SHELL_COMMANDS
+        value: ls,cat,grep,echo
+    healthCheckPath: /health
+    plan: starter

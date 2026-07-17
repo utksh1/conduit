@@ -1,169 +1,806 @@
-# Unofficial ChatGPT-to-OpenAI API Gateway
+# Conduit
 
-[![Status](https://img.shields.io/badge/status-active-success.svg)](#)
-[![Node](https://img.shields.io/badge/node-%3E%3D%2018.0.0-blue.svg)](#)
-[![Zero Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen.svg)](#)
+[![Rust](https://img.shields.io/badge/rust-1.75+-orange.svg)](https://www.rust-lang.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Binary Size](https://img.shields.io/badge/binary-5.1MB-green.svg)](Cargo.toml)
 
-A lightweight, zero-dependency Node.js Express server that acts as a local or remote proxy. It allows you to use your web-based ChatGPT account as a standard OpenAI-compatible API endpoint inside any client or library (e.g. IDE extensions like **Cursor/Continue/Kilo Code**, frontends like **LobeChat**, or custom scripts).
-
-The gateway automatically handles session-token auto-refreshing, solves upstream **Sentinel Proof-of-Work (PoW)** challenges locally, and translates stateful conversation threads and client-side tool calling formats.
+A high-performance Rust proxy that transforms ChatGPT's web interface into an OpenAI-compatible API. Use your ChatGPT subscription with any tool that supports the OpenAI protocol — Cursor, Continue, custom scripts, and more.
 
 ---
 
 ## ✨ Features
 
-- **🔄 Automatic Token Refresh**: Logs into your web account using your long-lived `__Secure-next-auth.session-token` browser cookie and automatically fetches/refreshes the short-lived `accessToken` on the fly.
-- **⚡ Sentinel PoW Solver**: Solves ChatGPT Web's SHA3-512-based Sentinel Proof-of-Work challenge locally in `0–5ms` to avoid `403 Forbidden` errors.
-- **🧠 Stateful Conversation Mapping**: Translates stateless OpenAI message histories into stateful ChatGPT conversation threads via SHA-256 message fingerprinting.
-- **🛠️ Client-Side Tool Calling (Agent Mode)**: Intercepts and parses custom tools requested by agentic clients (like Kilo Code) and forwards them seamlessly.
-- **🧩 Multi-Format Tool Extraction**: Uses a 4-pass parser to extract tool calls from model outputs in multiple formats (XML tags, bare fenced JSON, bare function calls, and custom-named XML tags).
-- **📡 Server-Sent Events (SSE)**: Converts ChatGPT's accumulated-stream chunks into standard real-time OpenAI chunk deltas.
-- **🎨 Premium UI Dashboard**: Served on the root `/` route for interactive prompting, model switching, and real-time latency/model tracking.
+### Core Capabilities
+- **🔌 OpenAI-Compatible API** — Drop-in replacement for `/v1/chat/completions` and `/v1/models`
+- **🔄 Automatic Token Management** — Refreshes session tokens on expiry with exponential backoff retry
+- **⚡ Advanced Proof-of-Work Solver** — Dual-mode solver with browser fingerprinting
+  - **New Algorithm**: OmniRoute-compatible with 18-element prekey config (hex prefix comparison)
+  - **Legacy Support**: Original SHA3-512 solver with leading zero bits (backward compatible)
+  - **Sentinel Prepare Token**: Two-step PoW process for enhanced challenge handling
+- **🧠 Stateful Conversations** — Maps OpenAI message histories to ChatGPT threads via SHA-256 fingerprinting
+- **📡 SSE Streaming** — Full support for real-time streaming responses with delta computation
+- **🔄 Continue Generation** — Automatically handles max_tokens cutoffs by continuing responses
+
+### Cloudflare & Bot Detection Evasion
+- **🌐 Browser-Like Headers** — Complete Firefox 152 header emulation with OAI-specific fields
+  - Stable device ID generation (SHA-256 of session token)
+  - Random session IDs per conversation
+  - Sec-Fetch-* headers, proper Accept-Encoding
+- **🍪 Advanced Cookie Handling** — Supports all ChatGPT token formats
+  - Chunked tokens (`__Secure-next-auth.session-token.0`, `.1`, `.2`)
+  - Unchunked tokens (single value)
+  - Full Cookie header parsing
+  - Cloudflare cookie preservation (cf_clearance, __cf_bm, _cfuvid)
+  - Automatic token rotation handling
+- **🔥 Session Warmup System** — Mimics browser page load to reduce PoW difficulty
+  - LRU cache with 60-second TTL (200 max entries)
+  - Parallel warmup to 3 endpoints before conversations
+  - Non-fatal failure handling
+- **🎭 Browser Fingerprinting** — 18-element prekey config matching real browsers
+  - Randomized screen sizes, CPU cores, navigator keys
+  - Dynamic DPL (deployment hash) scraping from chatgpt.com
+  - Webpack chunk URL extraction
+  - 60-minute cache with fallback defaults
+
+### Tool System
+- **🛠️ Chimera-Inspired Tools** — Execute filesystem, HTTP, shell, and code analysis operations
+- **🔒 Security Sandboxing** — Whitelist-based access control for all tools
+  - **Filesystem**: Directory restrictions, size limits, path traversal protection
+  - **HTTP**: SSRF protection, domain allowlists, response size limits
+  - **Shell**: Command whitelisting, output truncation
+  - **Code**: Safe analysis without execution
+
+### Performance & Deployment
+- **🚀 Tiny Footprint** — 5.1MB optimized binary with LTO and symbol stripping
+- **💾 Memory Efficient** — LRU conversation cache (max 1000), <100MB typical usage
+- **🐳 Docker Ready** — Multi-stage Dockerfile with dependency caching
+- **☁️ Render Compatible** — Includes `render.yaml` for one-click deployment
+
+### Additional Features
+- **🎨 Optional Dashboard** — Web UI served from `dashboard/dist` (build separately)
+- **🤔 Thinking Models** — Support for o1, o3, and reasoning-enabled models
+- **🔐 API Key Protection** — Optional `PROXY_API_KEY` to restrict access
+- **📊 Health Checks** — `/health` endpoint for monitoring and load balancers
 
 ---
 
-## 🏗️ How It Works
+## 🚀 Quick Start
 
-### 1. Request Lifecycle
-```mermaid
-flowchart TD
-  Client[Client request: POST /v1/chat/completions] --> Auth[Check & Refresh Access Token]
-  Auth --> StateCheck{Are custom tools present?}
-  StateCheck -->|No| Stateful[Use Stateful Cache Turn Mapping]
-  StateCheck -->|Yes| Stateless[Use Stateless Fallback + XML Prompt Preamble]
-  Stateful & Stateless --> PoW[Solve Sentinel Proof-of-Work SHA3-512]
-  PoW --> Upstream[POST chatgpt.com/backend-api/conversation]
-  Upstream --> SSE[Re-encode SSE chunks to OpenAI format]
-  SSE --> Parser[Extract Tool Calls if present]
-  Parser --> Response[Return JSON/Stream to Client]
+### Prerequisites
+
+- **Rust 1.75+** — Install via [rustup](https://rustup.rs/)
+- **ChatGPT session token** — See [Getting Your Session Token](#-getting-your-session-token)
+
+### Installation
+
+```bash
+# Clone the repository
+git clone https://github.com/your-org/conduit.git
+cd conduit
+
+# Copy environment template
+cp .env.example .env
+
+# Edit .env and add your CHATGPT_SESSION_TOKEN
+nano .env
 ```
 
-### 2. Stateful Conversation Threads
-When no custom client tools are present, the proxy automatically maps turn histories to the exact `conversation_id` and `parent_message_id` on the ChatGPT backend. 
-- Computes a SHA-256 fingerprint of the message history prefix (roles, names, contents, and tool outputs).
-- Hits or misses local thread caches to maintain context natively on ChatGPT's servers without having to re-send collapsed context.
+### Run in Development
 
-### 3. Agent Tool Call Fallback (Kilo Code)
-ChatGPT's backend does not support registering custom, client-side tools (like a local terminal execution tool). When client tools are sent:
-1. **Stateless Fallback**: The proxy bypasses stateful mapping and falls back to a stateless conversation turn.
-2. **Preamble Injection**: Prepends a strict `<tool_call>` system prompt protocol to the prompt message describing the XML formatting.
-3. **Model Upgrade**: Automatically upgrades the request model to `gpt-5-5-thinking` (if a reasoning model is not already requested) to guarantee strong protocol adherence.
+```bash
+cargo run
+```
 
-### 4. Robust 4-Pass Tool Call Parser
-The proxy is highly resilient to model variations and parses tool calls using four sequential passes:
-- **Pass 1 (XML Tags)**: Matches generic tags: `<tool_call>`, `<function_call>`, `<call>`, or `<tool>`.
-- **Pass 2 (Fenced JSON)**: Parses bare JSON objects inside code fences (e.g. ` ```json ... ``` `) if no XML tags are emitted.
-- **Pass 3 (Bare Function Calls)**: Extracts standard function call formatting: `tool_name(json_arguments)`.
-- **Pass 4 (Custom XML Tags)**: Matches tags named after the tool itself (e.g. `<file_search.msearch>{"queries":[]}</file_search.msearch>`), ignoring a blacklist of standard HTML tags to avoid false positives.
+Server starts on `http://127.0.0.1:3040`
+
+### Build Optimized Release
+
+```bash
+cargo build --release
+./target/release/conduit
+```
+
+### Docker
+
+```bash
+# Build image
+docker build -t chatgpt-proxy-rust .
+
+# Run container
+docker run -p 3040:3040 \
+  -e CHATGPT_SESSION_TOKEN=your_token_here \
+  -e ALLOWED_DIRECTORIES=/tmp \
+  chatgpt-proxy-rust
+```
+
+### Deploy to Render
+
+1. Push repository to GitHub
+2. Import repository on Render
+3. Select `render.yaml` configuration
+4. Set `CHATGPT_SESSION_TOKEN` in environment variables
+5. Deploy
 
 ---
 
-## 🛠️ Step-by-Step Setup Guide
+## ⚙️ Configuration
 
-### 1. Extract Your Session Cookie
-To let the server call ChatGPT on your behalf, copy your long-lived session cookie:
-1. Go to [https://chatgpt.com](https://chatgpt.com) and log in.
-2. Press `F12` (or `Cmd + Option + I` on Mac) to open DevTools.
-3. Go to the **Application** tab (Chrome/Edge/Safari) or **Storage** tab (Firefox).
-4. Expand **Cookies** and select `https://chatgpt.com`.
-5. Locate the cookie named **`__Secure-next-auth.session-token`** and copy its **Value** (a very long string).
+All configuration via environment variables (`.env` file supported):
 
-### 2. Configure Environment Variables
-Create a `.env` file in the project directory:
+### Required
+
+| Variable | Description |
+|----------|-------------|
+| `CHATGPT_SESSION_TOKEN` | Your ChatGPT session cookie (see below) |
+
+### Server
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `3040` | Server port |
+| `HOST` | `0.0.0.0` | Server bind address |
+| `PROXY_API_KEY` | — | Optional API key to protect the proxy |
+
+### Tool Security
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ALLOWED_DIRECTORIES` | — | Comma-separated paths for filesystem tool (e.g., `/home/user/projects,/tmp`) |
+| `ALLOWED_SHELL_COMMANDS` | `ls,cat,grep,echo` | Comma-separated allowed shell commands |
+| `TOOL_FORCE_THINKING` | `false` | Auto-upgrade to thinking model when tools present |
+| `TOOL_THINKING_MODEL` | `o3` | Model to use when `TOOL_FORCE_THINKING=true` |
+
+### Example `.env`
+
 ```env
-PORT=3000
-
-# Paste your copied session token here:
+# Required
 CHATGPT_SESSION_TOKEN=eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0...
 
-# (Optional) Full raw cookie header from chatgpt.com if Sentinel still 401s:
-CHATGPT_COOKIES=
+# Optional
+PORT=3040
+HOST=0.0.0.0
+PROXY_API_KEY=my-secret-key-123
 
-# (Optional) Add a local API key to protect your proxy:
-PROXY_API_KEY=
-
-# Default model id to send upstream when client omits it
-DEFAULT_MODEL=auto
-
-# Auto-upgrade standard models to thinking variants when tools are present (default: false)
+# Tool Security
+ALLOWED_DIRECTORIES=/home/user/projects,/tmp
+ALLOWED_SHELL_COMMANDS=ls,cat,grep,echo,find,wc
 TOOL_FORCE_THINKING=false
 ```
 
-### 3. Start the Server
-```bash
-# Install dependencies
-npm install
+### Session Token Formats
 
-# Start the proxy server
-npm start
-```
-By default, the server starts on `http://localhost:3000`. Override the port if needed:
-```bash
-PORT=3002 npm start
-```
+The proxy supports multiple session token formats:
+
+1. **Simple Token Value** (most common):
+   ```env
+   CHATGPT_SESSION_TOKEN=eyJhbGciOiJkaXIi...
+   ```
+
+2. **Unchunked Cookie**:
+   ```env
+   CHATGPT_SESSION_TOKEN=__Secure-next-auth.session-token=eyJhbGciOiJkaXIi...
+   ```
+
+3. **Chunked Cookie** (when token is split across multiple cookies):
+   ```env
+   CHATGPT_SESSION_TOKEN=__Secure-next-auth.session-token.0=part1; __Secure-next-auth.session-token.1=part2; __Secure-next-auth.session-token.2=part3
+   ```
+
+4. **Full Cookie Header** (includes Cloudflare cookies):
+   ```env
+   CHATGPT_SESSION_TOKEN=__Secure-next-auth.session-token=token; cf_clearance=...; __cf_bm=...
+   ```
+
+All formats are automatically parsed and normalized.
 
 ---
 
-## 🚀 Client Integration Guide
+## 🔑 Getting Your Session Token
 
-### 1. Kilo Code (VS Code Extension)
-Open your global `~/.config/kilo/kilo.jsonc` file and configure a custom provider:
-```jsonc
+1. Go to [chatgpt.com](https://chatgpt.com) and log in
+2. Open browser DevTools:
+   - **Chrome/Edge**: Press `F12` or `Cmd+Option+I` (Mac)
+   - **Firefox**: Press `F12` or `Cmd+Option+I` (Mac)
+3. Navigate to **Application** (Chrome/Edge) or **Storage** (Firefox) tab
+4. Expand **Cookies** → `https://chatgpt.com`
+5. Find `__Secure-next-auth.session-token`
+6. Copy the **Value** (long encrypted string)
+7. Paste into `.env` as `CHATGPT_SESSION_TOKEN`
+
+⚠️ **Security Note**: Treat this like a password. Anyone with your session token has full access to your ChatGPT account.
+
+---
+
+## 📡 API Reference
+
+### `POST /v1/chat/completions`
+
+OpenAI-compatible chat completions endpoint.
+
+**Request:**
+```bash
+curl http://localhost:3040/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your-proxy-api-key" \
+  -d '{
+    "model": "gpt-4o",
+    "messages": [
+      {"role": "user", "content": "Hello!"}
+    ],
+    "stream": true
+  }'
+```
+
+**Supported Parameters:**
+- `model`: `gpt-4o`, `gpt-4o-mini`, `o1`, `o3` (actual model depends on your ChatGPT tier)
+- `messages`: Array of message objects with `role` and `content`
+- `stream`: Boolean for SSE streaming (default: false)
+- `tools`: Array of tool definitions (triggers tool execution mode)
+
+**Response:**
+```json
 {
-  "provider": {
-    "chatgpt-gateway": {
-      "name": "ChatGPT Gateway",
-      "api": "http://localhost:3000/v1",
-      "npm": "@ai-sdk/openai-compatible",
-      "options": {
-        "apiKey": "anything", // Or your PROXY_API_KEY
-        "baseURL": "http://localhost:3000/v1"
-      },
-      "models": {
-        "gpt-5-5-thinking": { "name": "GPT-5.5 Thinking" },
-        "gpt-5-5": { "name": "GPT-5.5" }
-      }
-    }
-  },
-  "model": "chatgpt-gateway/gpt-5-5-thinking"
+  "id": "chatcmpl-123",
+  "object": "chat.completion",
+  "model": "gpt-4o",
+  "choices": [{
+    "index": 0,
+    "message": {
+      "role": "assistant",
+      "content": "Hello! How can I help you?"
+    },
+    "finish_reason": "stop"
+  }]
 }
 ```
 
-### 2. Cursor IDE
-1. Open Cursor **Settings** -> **Models**.
-2. Under **OpenAI API**, override the Base URL: `http://localhost:3000/v1`.
-3. Set the API Key to `anything` (or your configured `PROXY_API_KEY`).
+### `GET /v1/models`
 
-### 3. Continue (VS Code Extension)
-Add the model definition to your `config.json`:
+Lists available models.
+
+**Response:**
 ```json
 {
-  "models": [
-    {
-      "title": "ChatGPT Local Proxy",
-      "provider": "openai",
-      "model": "gpt-5-5-thinking",
-      "apiBase": "http://localhost:3000/v1",
-      "apiKey": "anything"
-    }
+  "data": [
+    {"id": "gpt-4o", "object": "model"},
+    {"id": "gpt-4o-mini", "object": "model"},
+    {"id": "o1", "object": "model"},
+    {"id": "o3", "object": "model"}
   ]
 }
 ```
 
-### 4. LobeChat / NextChat
-Set the custom OpenAI proxy URL:
-- **API Key**: `anything`
-- **Base URL**: `http://localhost:3000/v1`
+### `GET /health`
+
+Health check endpoint (returns `"ok"`).
 
 ---
 
-## ⚠️ Essential Notices & Disclaimers
+## 🔌 Client Integration
 
-> [!WARNING]
-> **Account Security**: Keep your `__Secure-next-auth.session-token` secure. Sharing it or checking it into public repositories gives anyone full control of your ChatGPT account!
+### Cursor IDE
 
-> [!IMPORTANT]
-> **Rate Limits & IP Blocks**: This proxy uses your browser's session, making you subject to the same rate limits and IP checks as the web application. Fast parallel requests may trigger Cloudflare checks or temporary rate-limiting.
+1. Open **Cursor Settings** → **Models**
+2. Under **OpenAI API**, override:
+   - **Base URL**: `http://localhost:3040/v1`
+   - **API Key**: Your `PROXY_API_KEY` (or any value if not set)
+3. Save and start chatting
 
-> [!CAUTION]
-> **Terms of Service**: This is an unofficial tool and violates OpenAI's terms of service regarding automated scrapers. Use it strictly for personal evaluation and experimentation.
+### Continue (VS Code Extension)
+
+Edit `~/.continue/config.json`:
+
+```json
+{
+  "models": [{
+    "title": "ChatGPT Proxy",
+    "provider": "openai",
+    "model": "gpt-4o",
+    "apiBase": "http://localhost:3040/v1",
+    "apiKey": "your-proxy-api-key"
+  }]
+}
+```
+
+### Kilo Code (VS Code Extension)
+
+Edit `~/.config/kilo/kilo.jsonc`:
+
+```jsonc
+{
+  "provider": {
+    "chatgpt-proxy": {
+      "name": "ChatGPT Proxy",
+      "api": "http://localhost:3040/v1",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "apiKey": "your-proxy-api-key",
+        "baseURL": "http://localhost:3040/v1"
+      },
+      "models": {
+        "gpt-4o": { "name": "GPT-4o" },
+        "o3": { "name": "o3 (Reasoning)" }
+      }
+    }
+  },
+  "model": "chatgpt-proxy/gpt-4o"
+}
+```
+
+### LobeChat / NextChat
+
+Configure custom OpenAI endpoint:
+- **Base URL**: `http://localhost:3040/v1`
+- **API Key**: Your `PROXY_API_KEY`
+
+### Custom Scripts (Python)
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    api_key="your-proxy-api-key",
+    base_url="http://localhost:3040/v1"
+)
+
+response = client.chat.completions.create(
+    model="gpt-4o",
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+
+print(response.choices[0].message.content)
+```
+
+---
+
+## 🛠️ Tool System
+
+The proxy includes a Chimera-inspired tool execution system that allows the model to interact with your environment.
+
+### Available Tools
+
+#### Filesystem Tool
+```bash
+# Allow specific directories
+ALLOWED_DIRECTORIES=/home/user/projects,/tmp
+```
+
+Operations: `read_file`, `write_file`
+
+Security:
+- Path traversal protection (canonicalization)
+- Directory whitelist enforcement
+- File size limits (10MB)
+
+#### HTTP Tool
+
+Operations: `http_request` (GET, POST, PUT, DELETE)
+
+Security:
+- SSRF protection (blocks localhost, private IPs)
+- Optional domain allowlist
+- Response size limits (10MB)
+- 30-second timeout
+
+#### Shell Tool
+
+```bash
+# Whitelist commands
+ALLOWED_SHELL_COMMANDS=ls,cat,grep,echo,find,wc,git
+```
+
+Security:
+- Command whitelist enforcement
+- Output size limits (1MB)
+- Stderr capture
+
+#### Code Analysis Tool
+
+Operations: `lint`, `format` (stub implementation)
+
+### Tool Call Format
+
+The model responds with markdown-formatted tool calls:
+
+```markdown
+I'll read the file for you.
+
+```tool_call
+{
+  "tool_calls": [
+    {
+      "id": "call_1",
+      "name": "read_file",
+      "arguments": {"path": "/tmp/example.txt"}
+    }
+  ]
+}
+```
+```
+
+The proxy:
+1. Parses the tool call
+2. Executes the tool (with security checks)
+3. Sends results back to the model
+4. Model generates final response
+
+---
+
+## 📁 Project Structure
+
+```
+src/
+├── main.rs              # Server entry, router, state initialization
+├── config.rs            # Environment configuration & security config
+├── error.rs             # Application error types (OpenAI-compatible)
+├── lib.rs               # Public module exports
+│
+├── auth/
+│   ├── mod.rs
+│   ├── cookie.rs        # Advanced cookie parsing (chunked, rotation, Cloudflare)
+│   └── token_manager.rs # Token caching, refresh, expiry checks
+│
+├── chatgpt/
+│   ├── mod.rs
+│   ├── client.rs        # ChatGPT HTTP client, 401 retry, PoW handling
+│   ├── models.rs        # Request/response types
+│   ├── headers.rs       # Browser-like header builder with OAI fields
+│   ├── warmup.rs        # Session warmup cache (LRU, 60s TTL)
+│   ├── prekey.rs        # 18-element browser fingerprint config
+│   ├── dpl.rs           # Dynamic deployment hash scraper
+│   ├── pow.rs           # Dual-mode PoW solver (new + legacy)
+│   └── sentinel.rs      # Sentinel prepare token (two-step PoW)
+│
+├── conversation/
+│   ├── mod.rs
+│   ├── cache.rs         # In-memory conversation cache (LRU)
+│   └── hash.rs          # SHA-256 message hashing for stateful mapping
+│
+├── routes/
+│   ├── mod.rs
+│   ├── chat.rs          # POST /v1/chat/completions (tool loop, streaming)
+│   └── models.rs        # GET /v1/models
+│
+├── streaming/
+│   ├── mod.rs
+│   └── transformer.rs   # SSE stream transformer (ChatGPT → OpenAI deltas)
+│
+└── tools/
+    ├── mod.rs
+    ├── code.rs          # Code analysis tool (stub)
+    ├── executor.rs      # Tool dispatch router
+    ├── filesystem.rs    # Filesystem tool (sandboxed)
+    ├── http.rs          # HTTP request tool (SSRF-protected)
+    ├── parser.rs        # Tool call marker parser (Chimera approach)
+    ├── prompt.rs        # Tool prompt injection
+    ├── registry.rs      # Tool definitions & registry
+    └── shell.rs         # Shell execution tool (whitelisted)
+
+tests/
+├── auth_tests.rs        # Token management tests
+├── config_tests.rs      # Configuration loading tests
+├── conversation_tests.rs # Hashing & caching tests
+├── pow_tests.rs         # Proof-of-work solver tests (both modes)
+├── routes_tests.rs      # Route handler tests
+├── streaming_tests.rs   # SSE streaming tests
+├── cookie_tests.rs      # Chunked token parsing tests (9 tests)
+├── headers_tests.rs     # Browser header generation tests (8 tests)
+├── warmup_tests.rs      # Session warmup cache tests (7 tests)
+├── prekey_tests.rs      # Fingerprint config tests (8 tests)
+├── dpl_tests.rs         # DPL scraper tests (5 tests)
+├── sentinel_tests.rs    # Sentinel prepare token tests (1 test)
+└── tools_*.rs           # Tool-specific tests (19 tests total)
+
+docs/
+├── PRD.md               # Product requirements
+├── ARCHITECTURE.md      # Technical architecture
+├── PHASES.md            # Implementation phases
+├── TASKS.md             # Task tracking
+├── RULES.md             # Development rules
+└── TESTING.md           # Testing strategy
+
+TESTING_SUMMARY.md       # Phase 1+2 testing results
+dashboard/               # Optional web UI (Vite + React + TypeScript)
+```
+
+---
+
+## 🧪 Testing
+
+### Run All Tests
+
+```bash
+# Run all tests (49 total)
+cargo test --all-features
+
+# Run with output
+cargo test -- --nocapture
+
+# Run specific test
+cargo test test_token_expiry
+
+# Run integration tests only
+cargo test --test integration
+```
+
+### Test Coverage by Module
+
+| Module | Tests | Status |
+|--------|-------|--------|
+| `headers.rs` | 8 | ✅ Device ID, session ID, OAI headers |
+| `cookie.rs` | 9 | ✅ Chunked/unchunked parsing, rotation |
+| `warmup.rs` | 7 | ✅ LRU cache, TTL, parallel warmup |
+| `prekey.rs` | 8 | ✅ Config structure, randomization |
+| `dpl.rs` | 5 | ✅ HTML parsing, fallbacks, cache |
+| `pow.rs` | 5 | ✅ Both solvers, hex prefix, legacy |
+| `sentinel.rs` | 1 | ✅ Prepare token structure |
+| `existing` | 6 | ✅ Auth, config, conversations, etc. |
+| **Total** | **49** | **✅ 100% passing** |
+
+### Test Coverage
+
+```bash
+# Install coverage tool
+cargo install cargo-llvm-cov
+
+# Generate coverage report
+cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+```
+
+### Manual Testing Checklist
+
+See `TESTING_SUMMARY.md` for comprehensive Phase 1+2 testing results with real ChatGPT API.
+
+---
+
+## 🐛 Troubleshooting
+
+### Server Won't Start
+
+**Error:** `Failed to load configuration: Missing CHATGPT_SESSION_TOKEN`
+
+**Fix:** Ensure `.env` file exists with valid token:
+```bash
+cp .env.example .env
+# Edit .env and add your token
+```
+
+### Authentication Errors
+
+**Error:** `Authentication error: Failed to refresh token, status: 403`
+
+**Cause:** Session token expired or invalid
+
+**Fix:**
+1. Re-login to [chatgpt.com](https://chatgpt.com)
+2. Open DevTools → Application → Cookies
+3. Copy fresh `__Secure-next-auth.session-token`
+4. Update `.env` with new token
+5. Restart server
+
+**Tip:** If you see HTML responses instead of JSON, your token is definitely expired.
+
+### Session Token Formats
+
+**Problem:** Token not recognized
+
+**Solutions:**
+
+1. **Simple token value** (recommended):
+   ```env
+   CHATGPT_SESSION_TOKEN=eyJhbGciOiJkaXIi...
+   ```
+
+2. **If using chunked tokens** (`.0`, `.1`, `.2`):
+   ```env
+   CHATGPT_SESSION_TOKEN=__Secure-next-auth.session-token.0=part1; __Secure-next-auth.session-token.1=part2
+   ```
+
+3. **Include Cloudflare cookies** for better success:
+   ```env
+   CHATGPT_SESSION_TOKEN=__Secure-next-auth.session-token=token; cf_clearance=xyz; __cf_bm=abc
+   ```
+
+### PoW Challenge Issues
+
+**Problem:** Frequent PoW challenges or timeouts
+
+**Causes:**
+- Datacenter IP detected
+- Missing session warmup
+- Incorrect browser fingerprinting
+
+**Fixes:**
+1. Check logs for "Session warmup" - should run before conversations
+2. Verify headers in debug mode: `RUST_LOG=debug cargo run`
+3. Consider using residential IP or VPN
+4. Reduce request frequency
+
+### Cloudflare Blocks
+
+**Error:** `Cloudflare challenge encountered`
+
+**Solutions:**
+1. **Use residential IP** - Most effective
+2. **Add Cloudflare cookies** to session token (cf_clearance, __cf_bm)
+3. **Reduce request rate** - Wait 1-2 seconds between requests
+4. **Check IP reputation** - Some VPNs/proxies are blocked
+5. **Session warmup** - Automatically enabled, mimics browser behavior
+
+### Tool Execution Errors
+
+**Error:** `Path /some/path is outside allowed directories`
+
+**Fix:** Add directory to `ALLOWED_DIRECTORIES`:
+```env
+ALLOWED_DIRECTORIES=/home/user/projects,/tmp,/some/path
+```
+
+**Error:** `Command 'xyz' is not in the allowed commands whitelist`
+
+**Fix:** Add command to `ALLOWED_SHELL_COMMANDS`:
+```env
+ALLOWED_SHELL_COMMANDS=ls,cat,grep,echo,xyz
+```
+
+### Connection Issues
+
+**Problem:** Client can't connect
+
+**Checklist:**
+1. Server running? `curl http://localhost:3040/health`
+2. Correct port? Default is `3040`
+3. Connecting remotely? Set `HOST=0.0.0.0`
+4. Using `PROXY_API_KEY`? Pass it as API key in client
+
+### Debug Logging
+
+```bash
+# Debug level
+RUST_LOG=debug cargo run
+
+# Trace level (very verbose)
+RUST_LOG=trace cargo run
+
+# Debug only this crate
+RUST_LOG=chatgpt_to_api_rust=debug cargo run
+```
+
+### More Help
+
+See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for detailed troubleshooting guide.
+
+---
+
+## 📊 Performance
+
+### Metrics (Measured)
+
+- **Binary Size**: 5.1MB (optimized release with LTO)
+- **Memory Usage**: <50MB idle, <100MB under load
+- **PoW Solve Time**: 
+  - New algorithm: 10-100ms (hex prefix, prekey config)
+  - Legacy algorithm: 0-5ms (leading zero bits)
+- **Startup Time**: <100ms
+- **Session Warmup**: 3 parallel requests, ~200-500ms total
+
+### Optimizations
+
+- **LTO (Link-Time Optimization)** enabled in release profile
+- **Symbol stripping** for smaller binary
+- **Multi-stage Docker build** for minimal image size
+- **LRU conversation cache** with 1000-item limit
+- **LRU warmup cache** with 200-item limit, 60s TTL
+- **Connection pooling** via reqwest with HTTP/2
+- **Gzip decompression** for ChatGPT responses
+- **Parallel warmup** to 3 endpoints simultaneously
+- **DPL cache** with 60-minute TTL
+
+### Cloudflare Evasion Success Rate
+
+With Phase 1+2 improvements:
+- ✅ Browser-like headers reduce bot detection
+- ✅ Session warmup lowers PoW difficulty
+- ✅ Prekey config matches real browser fingerprints
+- ✅ Cloudflare cookies properly preserved
+- ⚠️ Still works best from residential IPs
+- ⚠️ Datacenter IPs may face challenges
+
+---
+
+## ⚠️ Disclaimers
+
+### Terms of Service
+
+This is an **unofficial tool** that uses ChatGPT's web interface. It violates OpenAI's terms of service regarding automated scrapers. Use strictly for:
+- Personal evaluation
+- Research purposes
+- Non-commercial experimentation
+
+**Not recommended for production use.**
+
+### Account Security
+
+- **Keep your session token secure** — treat it like a password
+- Never commit session tokens to git
+- Session tokens typically last 1-2 months before expiring
+- The proxy automatically refreshes access tokens, not session tokens
+
+### Rate Limits
+
+- Subject to same rate limits as ChatGPT web interface
+- Fast parallel requests may trigger Cloudflare challenges
+- Proxy detects 429 (rate limit) and 403 (Cloudflare) responses
+- Consider request throttling for heavy use
+
+### IP Blocks
+
+- ChatGPT may block datacenter IPs
+- Works best from residential IPs
+- VPN/proxy IPs may be blocked
+- Render/AWS deployments may face blocks
+
+---
+
+## 🤝 Contributing
+
+Contributions welcome! Please:
+
+1. Read `docs/RULES.md` for code style and conventions
+2. Add tests for new features
+3. Update documentation
+4. Follow commit message format: `type: description`
+
+### Development
+
+```bash
+# Format code
+cargo fmt --all
+
+# Lint
+cargo clippy --all-targets --all-features -- -D warnings
+
+# Run tests
+cargo test --all-features
+
+# Build docs
+cargo doc --open
+```
+
+---
+
+## 📄 License
+
+MIT License - see [LICENSE](LICENSE) file for details.
+
+---
+
+## 🙏 Acknowledgments
+
+- **OmniRoute** — Architecture inspiration for advanced Cloudflare evasion (Phase 1+2 implementation)
+- **chat2api** — Reference for enhanced PoW solver and browser fingerprinting
+- **Chimera** — Inspiration for tool system architecture
+- **OpenAI** — ChatGPT and OpenAI API specification
+- **Rust Community** — Excellent async ecosystem (Tokio, Axum, Reqwest)
+
+---
+
+## 📚 Documentation
+
+- **[TESTING_SUMMARY.md](TESTING_SUMMARY.md)** — Phase 1+2 implementation and testing results
+- **[PRD.md](docs/PRD.md)** — Product requirements and user stories
+- **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** — Technical architecture and design decisions
+- **[PHASES.md](docs/PHASES.md)** — Implementation phases and milestones
+- **[TESTING.md](docs/TESTING.md)** — Testing strategy and test pyramid
+- **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** — Common issues and solutions
+- **[TASKS.md](docs/TASKS.md)** — Task tracking and progress
+
+---
+
+## 🔗 Links
+
+- **Repository**: [GitHub](https://github.com/your-org/conduit)
+- **Issues**: [GitHub Issues](https://github.com/your-org/conduit/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/your-org/conduit/discussions)
+
+---
