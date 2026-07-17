@@ -75,7 +75,7 @@ A high-performance Rust proxy that transforms ChatGPT's web interface into an Op
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/conduit.git
+git clone https://github.com/utksh1/conduit.git
 cd conduit
 
 # Copy environment template
@@ -92,6 +92,19 @@ cargo run
 ```
 
 Server starts on `http://127.0.0.1:3040`
+
+### Build Dashboard (Optional)
+
+To use the web interface, you need to build the frontend dashboard:
+
+```bash
+cd dashboard
+npm install
+npm run build
+cd ..
+```
+
+The Conduit proxy will automatically serve the dashboard from `dashboard/dist` when you start the server.
 
 ### Build Optimized Release
 
@@ -799,8 +812,8 @@ MIT License - see [LICENSE](LICENSE) file for details.
 
 ## Links
 
-- **Repository**: [GitHub](https://github.com/your-org/conduit)
-- **Issues**: [GitHub Issues](https://github.com/your-org/conduit/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/your-org/conduit/discussions)
+- **Repository**: [GitHub](https://github.com/utksh1/conduit)
+- **Issues**: [GitHub Issues](https://github.com/utksh1/conduit/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/utksh1/conduit/discussions)
 
 ---
