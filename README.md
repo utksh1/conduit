@@ -415,7 +415,7 @@ Operations: `lint`, `format` (stub implementation)
 
 The model responds with markdown-formatted tool calls:
 
-```markdown
+````markdown
 I'll read the file for you.
 
 ```tool_call
@@ -429,7 +429,7 @@ I'll read the file for you.
   ]
 }
 ```
-```
+````
 
 The proxy:
 1. Parses the tool call
@@ -441,7 +441,7 @@ The proxy:
 
 ## Project Structure
 
-```
+```text
 src/
 ├── main.rs              # Server entry, router, state initialization
 ├── config.rs            # Environment configuration & security config
