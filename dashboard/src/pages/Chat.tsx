@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Send, Trash2, AlertCircle } from "lucide-react";
+import { Send, Trash2, AlertCircle, Image as ImageIcon } from "lucide-react";
 import { Card, Input, Select, Button, Label, Spinner } from "@/components/ui";
 
 type Role = "user" | "assistant";
@@ -8,18 +8,101 @@ interface Message {
   content: string;
 }
 
-const PROXY_BASE = "https://chatgpt.utksh.in";
-const MODELS = ["gpt-5-5", "gpt-5-5-instant", "gpt-5-5-thinking", "gpt-5-4-thinking", "gpt-5-3-instant", "gpt-5-2-instant", "gpt-5-2-thinking", "o3"];
+const PROXY_BASE = "";
+const DEFAULT_MODELS = ["gpt-5-5", "gpt-5-5-instant", "gpt-5-5-thinking", "gpt-5-4-thinking", "gpt-5-3-instant", "gpt-5-2-instant", "gpt-5-2-thinking", "o3"];
+
+function AuthImage({ src, alt }: { src: string; alt?: string }) {
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  
+  useEffect(() => {
+    let active = true;
+    const apiKey = localStorage.getItem("chat_api_key");
+    const headers: Record<string, string> = {};
+    if (apiKey) {
+      headers["Authorization"] = `Bearer ${apiKey}`;
+    }
+    
+    // If it's a relative path to our proxy, prepend proxy base if needed
+    const fetchUrl = src.startsWith("/") ? `${PROXY_BASE}${src}` : src;
+    
+    fetch(fetchUrl, { headers })
+      .then(res => res.ok ? res.blob() : null)
+      .then(blob => {
+         if (active && blob) {
+           setBlobUrl(URL.createObjectURL(blob));
+         }
+      })
+      .catch(console.error);
+      
+    return () => { active = false; };
+  }, [src]);
+
+  if (!blobUrl) {
+    return <div className="p-4 border rounded mt-2 mb-2 bg-[var(--color-surface)] text-sm flex justify-center items-center h-32"><Spinner size={24} /></div>;
+  }
+  return (
+    <img 
+      src={blobUrl} 
+      alt={alt} 
+      className="max-w-full rounded mt-2 mb-2 border border-[var(--color-border)] block"
+    />
+  );
+}
+
+function renderContent(content: string) {
+  if (!content) return null;
+  const parts = content.split(/(!\[.*?\]\(.*?\))/g);
+  return (
+    <>
+      {parts.map((part, i) => {
+        const match = part.match(/!\[(.*?)\]\((.*?)\)/);
+        if (match) {
+          return (
+            <AuthImage 
+              key={i} 
+              src={match[2]} 
+              alt={match[1]} 
+            />
+          );
+        }
+        return <span key={i}>{part}</span>;
+      })}
+    </>
+  );
+}
 
 export default function Chat() {
-  const [apiKey, setApiKey] = useState("");
-  const [model, setModel] = useState(MODELS[0]);
+  const [models, setModels] = useState(DEFAULT_MODELS);
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem("chat_api_key") || "");
+  const [model, setModel] = useState(DEFAULT_MODELS[0]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
+  const [imageMode, setImageMode] = useState(false);
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    localStorage.setItem("chat_api_key", apiKey);
+  }, [apiKey]);
+
+  useEffect(() => {
+    fetch("/v1/models")
+      .then((res) => res.json())
+      .then((data) => {
+        if (data && Array.isArray(data.data)) {
+          const fetchedModels = data.data.map((m: any) => m.id);
+          if (fetchedModels.length > 0) {
+            setModels(fetchedModels);
+            if (!fetchedModels.includes(model)) {
+              setModel(fetchedModels[0]);
+            }
+          }
+        }
+      })
+      .catch(console.error);
+  }, []);
 
   useEffect(() => {
     scrollerRef.current?.scrollTo({ top: scrollerRef.current.scrollHeight, behavior: "smooth" });
@@ -33,10 +116,15 @@ export default function Chat() {
   }
 
   async function send() {
-    const text = input.trim();
+    let text = input.trim();
     if (!text || !apiKey.trim() || streaming) return;
     setError(null);
     setInput("");
+    
+    if (imageMode) {
+      text = `Generate an image of ${text}`;
+    }
+    
     const next: Message[] = [...messages, { role: "user", content: text }, { role: "assistant", content: "" }];
     setMessages(next);
     setStreaming(true);
@@ -143,7 +231,7 @@ export default function Chat() {
           <div>
             <Label>Model</Label>
             <Select value={model} onChange={(e) => setModel(e.target.value)}>
-              {MODELS.map((m) => (
+              {models.map((m) => (
                 <option key={m} value={m}>{m}</option>
               ))}
             </Select>
@@ -167,7 +255,7 @@ export default function Chat() {
                     : "max-w-[80%] rounded-lg bg-[var(--color-surface-2)] text-[var(--color-fg)] px-4 py-2 text-sm whitespace-pre-wrap"
                 }
               >
-                {m.content || (streaming && i === messages.length - 1 ? <Spinner size={14} /> : null)}
+                {m.content ? renderContent(m.content) : (streaming && i === messages.length - 1 ? <Spinner size={14} /> : null)}
               </div>
             </div>
           ))}
@@ -180,10 +268,24 @@ export default function Chat() {
         </div>
 
         <div className="border-t p-3 flex items-end gap-2">
+          <Button 
+            variant={imageMode ? "primary" : "ghost"} 
+            className={`shrink-0 self-end mb-0 ${imageMode ? 'bg-purple-600 hover:bg-purple-700 text-white border-transparent' : ''}`}
+            onClick={() => setImageMode(!imageMode)}
+            title="Toggle Image Generation Mode"
+          >
+            <ImageIcon size={18} />
+          </Button>
           <textarea
             className="flex-1 resize-none rounded-md border bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)]"
             rows={2}
-            placeholder={apiKey ? "Message... (Enter to send, Shift+Enter for newline)" : "Add an API key first"}
+            placeholder={
+              !apiKey 
+                ? "Add an API key first" 
+                : imageMode 
+                  ? "Describe the image you want to generate..." 
+                  : "Message... (Enter to send, Shift+Enter for newline)"
+            }
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}

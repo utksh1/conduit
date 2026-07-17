@@ -572,8 +572,8 @@ panic = "abort"         # Smaller binary, faster unwinding
 ### Single Binary Deployment
 
 ```
-chatgpt-to-api-rust/
-├── chatgpt-to-api-rust    # Rust binary
+conduit/
+├── conduit    # Rust binary
 ├── dashboard/
 │   └── dist/              # Pre-built TypeScript dashboard
 └── .env                   # Configuration
@@ -581,7 +581,7 @@ chatgpt-to-api-rust/
 
 **Startup:**
 ```bash
-$ ./chatgpt-to-api-rust
+$ ./conduit
 [INFO] Loading configuration from .env
 [INFO] Starting HTTP server on 0.0.0.0:3000
 [INFO] Dashboard available at http://localhost:3000
@@ -594,10 +594,10 @@ $ ./chatgpt-to-api-rust
 ```dockerfile
 FROM debian:bookworm-slim
 WORKDIR /app
-COPY chatgpt-to-api-rust ./
+COPY conduit ./
 COPY dashboard/dist ./dashboard/dist
 EXPOSE 3000
-CMD ["./chatgpt-to-api-rust"]
+CMD ["./conduit"]
 ```
 
 **Resource Limits:**
