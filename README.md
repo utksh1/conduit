@@ -8,63 +8,63 @@ A high-performance Rust proxy that transforms ChatGPT's web interface into an Op
 
 ---
 
-## ✨ Features
+## Features
 
 ### Core Capabilities
-- **🔌 OpenAI-Compatible API** — Drop-in replacement for `/v1/chat/completions` and `/v1/models`
-- **🔄 Automatic Token Management** — Refreshes session tokens on expiry with exponential backoff retry
-- **⚡ Advanced Proof-of-Work Solver** — Dual-mode solver with browser fingerprinting
+- **OpenAI-Compatible API** — Drop-in replacement for `/v1/chat/completions` and `/v1/models`
+- **Automatic Token Management** — Refreshes session tokens on expiry with exponential backoff retry
+- **Advanced Proof-of-Work Solver** — Dual-mode solver with browser fingerprinting
   - **New Algorithm**: OmniRoute-compatible with 18-element prekey config (hex prefix comparison)
   - **Legacy Support**: Original SHA3-512 solver with leading zero bits (backward compatible)
   - **Sentinel Prepare Token**: Two-step PoW process for enhanced challenge handling
-- **🧠 Stateful Conversations** — Maps OpenAI message histories to ChatGPT threads via SHA-256 fingerprinting
-- **📡 SSE Streaming** — Full support for real-time streaming responses with delta computation
-- **🔄 Continue Generation** — Automatically handles max_tokens cutoffs by continuing responses
+- **Stateful Conversations** — Maps OpenAI message histories to ChatGPT threads via SHA-256 fingerprinting
+- **SSE Streaming** — Full support for real-time streaming responses with delta computation
+- **Continue Generation** — Automatically handles max_tokens cutoffs by continuing responses
 
 ### Cloudflare & Bot Detection Evasion
 - **🌐 Browser-Like Headers** — Complete Firefox 152 header emulation with OAI-specific fields
   - Stable device ID generation (SHA-256 of session token)
   - Random session IDs per conversation
   - Sec-Fetch-* headers, proper Accept-Encoding
-- **🍪 Advanced Cookie Handling** — Supports all ChatGPT token formats
+- **Advanced Cookie Handling** — Supports all ChatGPT token formats
   - Chunked tokens (`__Secure-next-auth.session-token.0`, `.1`, `.2`)
   - Unchunked tokens (single value)
   - Full Cookie header parsing
   - Cloudflare cookie preservation (cf_clearance, __cf_bm, _cfuvid)
   - Automatic token rotation handling
-- **🔥 Session Warmup System** — Mimics browser page load to reduce PoW difficulty
+- **Session Warmup System** — Mimics browser page load to reduce PoW difficulty
   - LRU cache with 60-second TTL (200 max entries)
   - Parallel warmup to 3 endpoints before conversations
   - Non-fatal failure handling
-- **🎭 Browser Fingerprinting** — 18-element prekey config matching real browsers
+- **Browser Fingerprinting** — 18-element prekey config matching real browsers
   - Randomized screen sizes, CPU cores, navigator keys
   - Dynamic DPL (deployment hash) scraping from chatgpt.com
   - Webpack chunk URL extraction
   - 60-minute cache with fallback defaults
 
 ### Tool System
-- **🛠️ Chimera-Inspired Tools** — Execute filesystem, HTTP, shell, and code analysis operations
-- **🔒 Security Sandboxing** — Whitelist-based access control for all tools
+- **Chimera-Inspired Tools** — Execute filesystem, HTTP, shell, and code analysis operations
+- **Security Sandboxing** — Whitelist-based access control for all tools
   - **Filesystem**: Directory restrictions, size limits, path traversal protection
   - **HTTP**: SSRF protection, domain allowlists, response size limits
   - **Shell**: Command whitelisting, output truncation
   - **Code**: Safe analysis without execution
 
 ### Performance & Deployment
-- **🚀 Tiny Footprint** — 5.1MB optimized binary with LTO and symbol stripping
-- **💾 Memory Efficient** — LRU conversation cache (max 1000), <100MB typical usage
-- **🐳 Docker Ready** — Multi-stage Dockerfile with dependency caching
-- **☁️ Render Compatible** — Includes `render.yaml` for one-click deployment
+- **Tiny Footprint** — 5.1MB optimized binary with LTO and symbol stripping
+- **Memory Efficient** — LRU conversation cache (max 1000), <100MB typical usage
+- **Docker Ready** — Multi-stage Dockerfile with dependency caching
+- **Render Compatible** — Includes `render.yaml` for one-click deployment
 
 ### Additional Features
-- **🎨 Optional Dashboard** — Web UI served from `dashboard/dist` (build separately)
-- **🤔 Thinking Models** — Support for o1, o3, and reasoning-enabled models
-- **🔐 API Key Protection** — Optional `PROXY_API_KEY` to restrict access
-- **📊 Health Checks** — `/health` endpoint for monitoring and load balancers
+- **Optional Dashboard** — Web UI served from `dashboard/dist` (build separately)
+- **Thinking Models** — Support for o1, o3, and reasoning-enabled models
+- **API Key Protection** — Optional `PROXY_API_KEY` to restrict access
+- **Health Checks** — `/health` endpoint for monitoring and load balancers
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 
@@ -123,7 +123,7 @@ docker run -p 3040:3040 \
 
 ---
 
-## ⚙️ Configuration
+## Configuration
 
 All configuration via environment variables (`.env` file supported):
 
@@ -195,7 +195,7 @@ All formats are automatically parsed and normalized.
 
 ---
 
-## 🔑 Getting Your Session Token
+## Getting Your Session Token
 
 1. Go to [chatgpt.com](https://chatgpt.com) and log in
 2. Open browser DevTools:
@@ -207,11 +207,11 @@ All formats are automatically parsed and normalized.
 6. Copy the **Value** (long encrypted string)
 7. Paste into `.env` as `CHATGPT_SESSION_TOKEN`
 
-⚠️ **Security Note**: Treat this like a password. Anyone with your session token has full access to your ChatGPT account.
+**Security Note**: Treat this like a password. Anyone with your session token has full access to your ChatGPT account.
 
 ---
 
-## 📡 API Reference
+## API Reference
 
 ### `POST /v1/chat/completions`
 
@@ -276,7 +276,7 @@ Health check endpoint (returns `"ok"`).
 
 ---
 
-## 🔌 Client Integration
+## Client Integration
 
 ### Cursor IDE
 
@@ -353,7 +353,7 @@ print(response.choices[0].message.content)
 
 ---
 
-## 🛠️ Tool System
+## Tool System
 
 The proxy includes a Chimera-inspired tool execution system that allows the model to interact with your environment.
 
@@ -426,7 +426,7 @@ The proxy:
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 src/
@@ -505,7 +505,7 @@ dashboard/               # Optional web UI (Vite + React + TypeScript)
 
 ---
 
-## 🧪 Testing
+## Testing
 
 ### Run All Tests
 
@@ -527,15 +527,15 @@ cargo test --test integration
 
 | Module | Tests | Status |
 |--------|-------|--------|
-| `headers.rs` | 8 | ✅ Device ID, session ID, OAI headers |
-| `cookie.rs` | 9 | ✅ Chunked/unchunked parsing, rotation |
-| `warmup.rs` | 7 | ✅ LRU cache, TTL, parallel warmup |
-| `prekey.rs` | 8 | ✅ Config structure, randomization |
-| `dpl.rs` | 5 | ✅ HTML parsing, fallbacks, cache |
-| `pow.rs` | 5 | ✅ Both solvers, hex prefix, legacy |
-| `sentinel.rs` | 1 | ✅ Prepare token structure |
-| `existing` | 6 | ✅ Auth, config, conversations, etc. |
-| **Total** | **49** | **✅ 100% passing** |
+| `headers.rs` | 8 | Device ID, session ID, OAI headers |
+| `cookie.rs` | 9 | Chunked/unchunked parsing, rotation |
+| `warmup.rs` | 7 | LRU cache, TTL, parallel warmup |
+| `prekey.rs` | 8 | Config structure, randomization |
+| `dpl.rs` | 5 | HTML parsing, fallbacks, cache |
+| `pow.rs` | 5 | Both solvers, hex prefix, legacy |
+| `sentinel.rs` | 1 | Prepare token structure |
+| `existing` | 6 | Auth, config, conversations, etc. |
+| **Total** | **49** | **100% passing** |
 
 ### Test Coverage
 
@@ -553,7 +553,7 @@ See `TESTING_SUMMARY.md` for comprehensive Phase 1+2 testing results with real C
 
 ---
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
 ### Server Won't Start
 
@@ -672,7 +672,7 @@ See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for detailed troubleshooting guide.
 
 ---
 
-## 📊 Performance
+## Performance
 
 ### Metrics (Measured)
 
@@ -699,16 +699,16 @@ See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for detailed troubleshooting guide.
 ### Cloudflare Evasion Success Rate
 
 With Phase 1+2 improvements:
-- ✅ Browser-like headers reduce bot detection
-- ✅ Session warmup lowers PoW difficulty
-- ✅ Prekey config matches real browser fingerprints
-- ✅ Cloudflare cookies properly preserved
-- ⚠️ Still works best from residential IPs
-- ⚠️ Datacenter IPs may face challenges
+- Browser-like headers reduce bot detection
+- Session warmup lowers PoW difficulty
+- Prekey config matches real browser fingerprints
+- Cloudflare cookies properly preserved
+- Still works best from residential IPs
+- Datacenter IPs may face challenges
 
 ---
 
-## ⚠️ Disclaimers
+## Disclaimers
 
 ### Terms of Service
 
@@ -742,7 +742,7 @@ This is an **unofficial tool** that uses ChatGPT's web interface. It violates Op
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 Contributions welcome! Please:
 
@@ -769,13 +769,13 @@ cargo doc --open
 
 ---
 
-## 📄 License
+## License
 
 MIT License - see [LICENSE](LICENSE) file for details.
 
 ---
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - **OmniRoute** — Architecture inspiration for advanced Cloudflare evasion (Phase 1+2 implementation)
 - **chat2api** — Reference for enhanced PoW solver and browser fingerprinting
@@ -785,7 +785,7 @@ MIT License - see [LICENSE](LICENSE) file for details.
 
 ---
 
-## 📚 Documentation
+## Documentation
 
 - **[TESTING_SUMMARY.md](TESTING_SUMMARY.md)** — Phase 1+2 implementation and testing results
 - **[PRD.md](docs/PRD.md)** — Product requirements and user stories
@@ -797,7 +797,7 @@ MIT License - see [LICENSE](LICENSE) file for details.
 
 ---
 
-## 🔗 Links
+## Links
 
 - **Repository**: [GitHub](https://github.com/your-org/conduit)
 - **Issues**: [GitHub Issues](https://github.com/your-org/conduit/issues)
