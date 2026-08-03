@@ -6,6 +6,7 @@ WORKDIR /app
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
     cmake \
+    g++ \
     git \
     libssl-dev \
     pkg-config \
