@@ -20,7 +20,7 @@ Set these in Render dashboard:
 CHATGPT_SESSION_TOKEN=<your-token>
 CHATGPT_ACCESS_TOKEN=<your-access-token>
 CHATGPT_REFRESH_TOKEN=<your-refresh-token>
-PROXY_API_KEY=rnd_t5fV8FUbylox0gOW72yTUm4rNZ8T
+PROXY_API_KEY=<generate-a-separate-application-api-key>
 PORT=3040
 HOST=0.0.0.0
 ALLOWED_DIRECTORIES=/tmp
@@ -39,7 +39,7 @@ curl https://your-app.onrender.com/health
 **Use it:**
 ```bash
 curl https://your-app.onrender.com/v1/chat/completions \
-  -H "Authorization: Bearer rnd_t5fV8FUbylox0gOW72yTUm4rNZ8T" \
+  -H "Authorization: Bearer <your-application-api-key>" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-4o",
@@ -49,11 +49,11 @@ curl https://your-app.onrender.com/v1/chat/completions \
 
 ## API Key
 
-**Production Key**: `rnd_t5fV8FUbylox0gOW72yTUm4rNZ8T`
+**Application API key**: configure a separate `PROXY_API_KEY` in Render when file-route authorization is needed.
 
 Use in all requests:
 ```
-Authorization: Bearer rnd_t5fV8FUbylox0gOW72yTUm4rNZ8T
+Authorization: Bearer <your-application-api-key>
 ```
 
 ## Repository

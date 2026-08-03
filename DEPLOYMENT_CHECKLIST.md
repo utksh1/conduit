@@ -6,7 +6,7 @@
 - [x] Heuristic tool parser implemented
 - [x] All features verified locally
 - [x] Deployment guide created
-- [x] Production API key set: `rnd_t5fV8FUbylox0gOW72yTUm4rNZ8T`
+- [ ] Set a separate application `PROXY_API_KEY` in Render
 
 ## 🚀 Deploy to Render
 
@@ -41,7 +41,7 @@ Click "Advanced" → "Add Environment Variable":
 CHATGPT_SESSION_TOKEN=<copy-from-.env>
 CHATGPT_ACCESS_TOKEN=<copy-from-.env>
 CHATGPT_REFRESH_TOKEN=<copy-from-.env>
-PROXY_API_KEY=rnd_t5fV8FUbylox0gOW72yTUm4rNZ8T
+PROXY_API_KEY=<your-application-api-key>
 PORT=3040
 HOST=0.0.0.0
 ALLOWED_DIRECTORIES=/tmp
@@ -60,7 +60,7 @@ curl https://your-app.onrender.com/health
 
 # Test API
 curl https://your-app.onrender.com/v1/chat/completions \
-  -H "Authorization: Bearer rnd_t5fV8FUbylox0gOW72yTUm4rNZ8T" \
+  -H "Authorization: Bearer <your-application-api-key>" \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-4o","messages":[{"role":"user","content":"Hello"}]}'
 ```
@@ -75,4 +75,4 @@ Save this URL and use it with:
 - Custom scripts
 - Any OpenAI-compatible client
 
-**API Key**: `rnd_t5fV8FUbylox0gOW72yTUm4rNZ8T`
+**Application API Key**: set `PROXY_API_KEY` in Render if you need file-route authorization.
