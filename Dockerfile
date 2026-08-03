@@ -5,9 +5,11 @@ WORKDIR /app
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
+    clang \
     cmake \
     g++ \
     git \
+    libclang-dev \
     libssl-dev \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
