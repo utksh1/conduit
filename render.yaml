@@ -11,7 +11,7 @@ services:
       - key: HOST
         value: 0.0.0.0
       - key: PROXY_API_KEY
-        value: rnd_t5fV8FUbylox0gOW72yTUm4rNZ8T
+        sync: false
       - key: ALLOWED_DIRECTORIES
         value: /tmp
       - key: ALLOWED_SHELL_COMMANDS
