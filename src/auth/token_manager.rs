@@ -10,13 +10,21 @@ use super::cookie::{parse_session_cookie, ParsedCookie};
 #[derive(Clone)]
 pub struct AuthManager {
     token: Arc<RwLock<Option<(String, Instant)>>>,
+    static_access_token: Option<String>,
+    refresh_token: Option<String>,
     parsed_cookie: ParsedCookie,
     client: Client,
     pub base_url: String,
 }
 
 impl AuthManager {
-    pub fn new(session_token: String, client: Client, base_url: Option<String>) -> Self {
+    pub fn new(
+        session_token: String, 
+        access_token: Option<String>, 
+        refresh_token: Option<String>, 
+        client: Client, 
+        base_url: Option<String>
+    ) -> Self {
         let parsed_cookie = parse_session_cookie(&session_token);
         tracing::info!("Parsed session token length: {}, full cookie header length: {}", 
             parsed_cookie.session_token.len(), 
@@ -24,6 +32,8 @@ impl AuthManager {
         
         Self {
             token: Arc::new(RwLock::new(None)),
+            static_access_token: access_token,
+            refresh_token,
             parsed_cookie,
             client,
             base_url: base_url.unwrap_or_else(|| "https://chatgpt.com/api/auth/session".to_string()),
@@ -50,6 +60,10 @@ impl AuthManager {
     }
 
     pub async fn get_token(&self) -> Result<String, AppError> {
+        if let Some(token) = &self.static_access_token {
+            return Ok(token.clone());
+        }
+
         {
             let cache = self.token.read().await;
             if let Some((token, expiry)) = &*cache {
@@ -64,8 +78,17 @@ impl AuthManager {
 
     pub async fn refresh_token(&self) -> Result<String, AppError> {
         info!("Refreshing ChatGPT access token...");
+
+        // If we have a refresh_token, try the OAuth endpoint first
+        if let Some(rt) = &self.refresh_token {
+            let res = self.refresh_via_oauth(rt).await;
+            if res.is_ok() {
+                return res;
+            }
+            warn!("OAuth refresh failed, falling back to session token: {:?}", res.err());
+        }
         
-        // Retry logic for token refresh
+        // Retry logic for token refresh via session endpoint
         let mut attempts = 0;
         let max_attempts = 3;
         
@@ -153,9 +176,50 @@ impl AuthManager {
         }
     }
 
-    pub fn is_token_expired(&self, expires_at: Instant) -> bool {
-        // 5-minute buffer before actual expiry
-        Instant::now() + Duration::from_secs(300) > expires_at
+    pub fn is_token_expired(&self, expiry: Instant) -> bool {
+        let now = Instant::now();
+        // Give a 60 second buffer before actual expiry
+        now >= (expiry - Duration::from_secs(60))
+    }
+
+    async fn refresh_via_oauth(&self, refresh_token: &str) -> Result<String, AppError> {
+        let url = "https://auth0.openai.com/oauth/token";
+        
+        let mut data = std::collections::HashMap::new();
+        data.insert("redirect_uri", "com.openai.chat://auth0.openai.com/ios/com.openai.chat/callback");
+        data.insert("grant_type", "refresh_token");
+        data.insert("client_id", "pdlLIX2Y72MIl2rhLhTE9VV9bN905kBh");
+        data.insert("refresh_token", refresh_token);
+
+        let req = self.client.post(url)
+            .header("Content-Type", "application/json")
+            .header("User-Agent", "Mozilla/5.0")
+            .json(&data);
+
+        match req.send().await {
+            Ok(response) => {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                if !status.is_success() {
+                    return Err(AppError::Auth(format!("OAuth refresh failed: {} - {}", status, body)));
+                }
+
+                if let Ok(json_data) = serde_json::from_str::<serde_json::Value>(&body) {
+                    if let Some(access_token) = json_data.get("access_token").and_then(|t| t.as_str()) {
+                        let expires_in = json_data.get("expires_in").and_then(|e| e.as_u64()).unwrap_or(2592000);
+                        let expiry = Instant::now() + Duration::from_secs(expires_in);
+                        
+                        let mut cache = self.token.write().await;
+                        *cache = Some((access_token.to_string(), expiry));
+                        info!("OAuth Token refreshed successfully (expires in {}s)", expires_in);
+                        
+                        return Ok(access_token.to_string());
+                    }
+                }
+                Err(AppError::Auth("OAuth response missing access_token".to_string()))
+            }
+            Err(e) => Err(AppError::Auth(format!("OAuth network error: {}", e))),
+        }
     }
 }
 

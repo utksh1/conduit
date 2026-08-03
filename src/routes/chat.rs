@@ -269,11 +269,15 @@ pub async fn chat_completions(
         _ => return Err(AppError::Auth("Invalid or inactive API key".to_string())),
     };
     
-    // 1. Inject tool prompts
-    req.messages = inject_tool_prompt(&state.tool_registry, req.messages);
+    // 1. Check if request has tools
+    let has_tools = req.tools.as_ref().map(|t| !t.is_empty()).unwrap_or(false);
     
-    // 2. Model Auto-Upgrade
-    let has_tools = !state.tool_registry.all_definitions().is_empty();
+    // 2. Inject tool prompts only if tools are provided
+    if has_tools {
+        req.messages = inject_tool_prompt(&state.tool_registry, req.messages);
+    }
+    
+    // 3. Model Auto-Upgrade
     let mut target_model = req.model.clone();
     if has_tools {
         if state.config.tool_force_thinking {
@@ -396,8 +400,16 @@ pub async fn chat_completions(
             state.conversation_cache.store(msg_hash.clone(), ctx).await;
         }
 
-        // Parse response for tool calls
-        match parser.parse_tool_calls(&result.text) {
+        // Parse response for tool calls (try structured first, then heuristic)
+        let tool_calls_result = parser.parse_tool_calls(&result.text)
+            .or_else(|_| {
+                let available = state.tool_registry.all_definitions()
+                    .iter().map(|t| t.name.clone()).collect::<Vec<_>>();
+                crate::tools::extract_tool_calls_heuristic(&result.text, &available)
+                    .ok_or(crate::tools::parser::ParseError::NoMarkersFound)
+            });
+        
+        match tool_calls_result {
             Ok(tool_calls) => {
                 if tool_calls.is_empty() {
                     if is_streaming {

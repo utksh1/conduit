@@ -4,3 +4,4 @@ pub mod auth;
 pub mod keys;
 pub mod telemetry;
 pub mod files;
+pub mod images;

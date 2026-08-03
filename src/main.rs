@@ -43,7 +43,13 @@ async fn main() {
         .build()
         .expect("Failed to build wreq client");
 
-    let auth_manager = AuthManager::new(config.session_token.clone(), client.clone(), None);
+    let auth_manager = AuthManager::new(
+        config.session_token.clone(),
+        config.access_token.clone(),
+        config.refresh_token.clone(),
+        client.clone(),
+        None,
+    );
     let chatgpt_client = ChatGPTClient::new(auth_manager.clone(), client.clone(), None);
     let conversation_cache = ConversationCache::new();
     let warmup_cache = WarmupCache::new(60, 200); // 60 second TTL, 200 max entries
@@ -229,6 +235,7 @@ async fn main() {
     let mut app = Router::new()
         .route("/v1/models", get(routes::models::list_models))
         .route("/v1/chat/completions", post(routes::chat::chat_completions))
+        .route("/v1/images/generations", post(routes::images::generate_image))
         .route("/v1/files/{*file_id}", get(routes::files::get_file))
         .route("/health", get(health_check))
         .nest("/api", admin_routes)

@@ -1,5 +1,5 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
-import { Activity, KeyRound, ScrollText, Settings as SettingsIcon, Shield, LogOut, MessageSquare } from "lucide-react";
+import { Activity, KeyRound, ScrollText, Settings as SettingsIcon, Shield, LogOut, MessageSquare, Image } from "lucide-react";
 import { useAuth } from "@/lib/auth-store";
 import clsx from "clsx";
 
@@ -7,6 +7,7 @@ const NAV = [
   { to: "/dashboard", label: "Dashboard", icon: Activity },
   { to: "/keys", label: "API Keys", icon: KeyRound },
   { to: "/chat", label: "Chat", icon: MessageSquare },
+  { to: "/images", label: "Images", icon: Image },
   { to: "/logs", label: "Request Logs", icon: ScrollText },
   { to: "/audit", label: "Audit Log", icon: Shield },
   { to: "/settings", label: "Settings", icon: SettingsIcon },

@@ -23,6 +23,8 @@ pub struct SecurityConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub session_token: String,
+    pub access_token: Option<String>,
+    pub refresh_token: Option<String>,
     pub port: u16,
     pub host: String,
     pub proxy_api_key: Option<String>,
@@ -38,6 +40,9 @@ impl Config {
 
         let session_token = env::var("CHATGPT_SESSION_TOKEN")
             .map_err(|_| "CHATGPT_SESSION_TOKEN must be set in the environment")?;
+
+        let access_token = env::var("CHATGPT_ACCESS_TOKEN").ok().filter(|s| !s.is_empty());
+        let refresh_token = env::var("CHATGPT_REFRESH_TOKEN").ok().filter(|s| !s.is_empty());
 
         let port_str = env::var("PORT").unwrap_or_else(|_| "3000".to_string());
         let port: u16 = port_str
@@ -88,6 +93,8 @@ impl Config {
 
         Ok(Config {
             session_token,
+            access_token,
+            refresh_token,
             port,
             host,
             proxy_api_key,

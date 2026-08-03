@@ -8,30 +8,21 @@ pub fn inject_tool_prompt(registry: &ToolRegistry, mut messages: Vec<serde_json:
         return messages;
     }
 
-    let mut tool_descriptions = String::from("You have access to the following tools:\n\n");
+    let mut tool_descriptions = String::from("SYSTEM: You are a function-calling assistant. You MUST use tools to answer questions.\n\nAvailable tools:\n");
     
     for tool in tools {
-        let schema = serde_json::to_string_pretty(&tool.parameters).unwrap_or_default();
         tool_descriptions.push_str(&format!(
-            "Tool: {}\nDescription: {}\nParameters (JSON Schema):\n{}\n\n",
-            tool.name, tool.description, schema
+            "- {}: {}\n",
+            tool.name, tool.description
         ));
     }
 
     tool_descriptions.push_str(
-        "To use a tool, you MUST reply with exactly this markdown format:\n\
+        "\nWhen the user asks you to do something, respond ONLY with:\n\
         ```tool_call\n\
-        {\n\
-          \"tool_calls\": [\n\
-            {\n\
-              \"id\": \"call_1\",\n\
-              \"name\": \"tool_name\",\n\
-              \"arguments\": { \"arg1\": \"value1\" }\n\
-            }\n\
-          ]\n\
-        }\n\
+        {\"tool_calls\": [{\"id\": \"call_1\", \"name\": \"TOOL_NAME\", \"arguments\": {}}]}\n\
         ```\n\
-        After I execute the tool, I will reply with the result."
+        Replace TOOL_NAME and arguments. DO NOT write explanations. ONLY the tool_call block."
     );
 
     let system_message = json!({

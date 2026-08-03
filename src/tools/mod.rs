@@ -7,8 +7,10 @@ pub mod http;
 pub mod code;
 pub mod prompt;
 pub mod websearch;
+pub mod heuristic;
 
 pub use registry::{ToolDefinition, ToolCall, ToolResult, ToolRegistry};
 pub use parser::ToolParser;
 pub use executor::ToolExecutor;
 pub use prompt::inject_tool_prompt;
+pub use heuristic::extract_tool_calls_heuristic;
