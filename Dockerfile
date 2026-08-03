@@ -30,7 +30,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy binary from builder
-COPY --from=builder /app/target/release/chatgpt-to-api-rust /app/chatgpt-to-api-rust
+COPY --from=builder /app/target/release/conduit /app/conduit
 
 # Copy dashboard if it exists (optional)
 COPY dashboard/dist/ /app/dashboard/dist/ 2>/dev/null || true
@@ -43,4 +43,4 @@ EXPOSE 3040
 ENV HOST=0.0.0.0
 ENV PORT=3040
 
-CMD ["/app/chatgpt-to-api-rust"]
+CMD ["/app/conduit"]
