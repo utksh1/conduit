@@ -32,9 +32,6 @@ RUN apt-get update && apt-get install -y \
 # Copy binary from builder
 COPY --from=builder /app/target/release/conduit /app/conduit
 
-# Copy dashboard if it exists (optional)
-COPY dashboard/dist/ /app/dashboard/dist/
-
 # Copy env example
 COPY .env.example /app/.env.example
 
