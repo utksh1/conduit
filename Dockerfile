@@ -33,7 +33,7 @@ RUN apt-get update && apt-get install -y \
 COPY --from=builder /app/target/release/conduit /app/conduit
 
 # Copy dashboard if it exists (optional)
-COPY dashboard/dist/ /app/dashboard/dist/ 2>/dev/null || true
+COPY dashboard/dist/ /app/dashboard/dist/
 
 # Copy env example
 COPY .env.example /app/.env.example
