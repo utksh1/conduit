@@ -23,8 +23,7 @@ function Root() {
   });
 
   if (isLoading) return <div className="flex h-full items-center justify-center"><Spinner size={24} /></div>;
-  if (data?.needsSetup) return <Login mode="setup" />;
-  if (!token || !data?.authenticated) return <Login mode="login" />;
+  if (!token || !data?.authenticated) return <Login />;
   return <Navigate to="/dashboard" replace />;
 }
 
@@ -48,7 +47,7 @@ export default function App() {
           <Route path="/settings" element={<Settings />} />
           <Route path="/audit" element={<Audit />} />
         </Route>
-        <Route path="/login" element={<Login mode="login" />} />
+        <Route path="/login" element={<Login />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>

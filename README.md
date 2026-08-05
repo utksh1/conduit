@@ -145,6 +145,9 @@ All configuration via environment variables (`.env` file supported):
 | Variable | Description |
 |----------|-------------|
 | `CHATGPT_SESSION_TOKEN` | Your ChatGPT session cookie (see below) |
+| `PROXY_API_KEY` | 32+-character key required for every `/v1/*` request |
+| `JWT_SECRET` | 32+-character stable signing secret for dashboard sessions |
+| `ADMIN_PASSWORD` | Dashboard administrator password (at least 12 characters) |
 
 ### Server
 
@@ -152,7 +155,6 @@ All configuration via environment variables (`.env` file supported):
 |----------|---------|-------------|
 | `PORT` | `3040` | Server port |
 | `HOST` | `0.0.0.0` | Server bind address |
-| `PROXY_API_KEY` | — | Optional API key to protect the proxy |
 
 ### Tool Security
 
@@ -168,11 +170,13 @@ All configuration via environment variables (`.env` file supported):
 ```env
 # Required
 CHATGPT_SESSION_TOKEN=eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0...
+PROXY_API_KEY=replace-with-a-32-character-or-longer-random-secret
+JWT_SECRET=replace-with-a-32-character-or-longer-random-secret
+ADMIN_PASSWORD=replace-with-a-strong-dashboard-password
 
 # Optional
 PORT=3040
 HOST=0.0.0.0
-PROXY_API_KEY=my-secret-key-123
 
 # Tool Security
 ALLOWED_DIRECTORIES=/home/user/projects,/tmp
@@ -289,6 +293,19 @@ Health check endpoint (returns `"ok"`).
 
 ---
 
+## Dashboard Deployment
+
+The dashboard is deployed independently on Vercel with `dashboard` as the project root. Configure these Vercel production environment variables:
+
+| Variable | Value |
+|----------|-------|
+| `RENDER_BACKEND_URL` | The HTTPS Render backend origin, such as `https://conduit-mlxk.onrender.com` |
+| `PROXY_API_KEY` | The same application key configured on Render |
+
+The browser only sends its dashboard session token. Vercel validates that session with Render and injects `PROXY_API_KEY` server-side for `/v1/*` traffic, so the key is not included in the built dashboard or browser storage.
+
+Render free services use ephemeral filesystem storage. SQLite-backed API keys, logs, and audit data can reset after a restart or redeploy. Dashboard sign-in remains recoverable because `ADMIN_PASSWORD` and `JWT_SECRET` are Render environment secrets; generated direct API keys must be recreated after a reset.
+
 ## Client Integration
 
 ### Cursor IDE
@@ -296,7 +313,7 @@ Health check endpoint (returns `"ok"`).
 1. Open **Cursor Settings** → **Models**
 2. Under **OpenAI API**, override:
    - **Base URL**: `http://localhost:3040/v1`
-   - **API Key**: Your `PROXY_API_KEY` (or any value if not set)
+   - **API Key**: Your required `PROXY_API_KEY`
 3. Save and start chatting
 
 ### Continue (VS Code Extension)
@@ -664,7 +681,7 @@ ALLOWED_SHELL_COMMANDS=ls,cat,grep,echo,xyz
 1. Server running? `curl http://localhost:3040/health`
 2. Correct port? Default is `3040`
 3. Connecting remotely? Set `HOST=0.0.0.0`
-4. Using `PROXY_API_KEY`? Pass it as API key in client
+4. Pass the required `PROXY_API_KEY` as the client API key
 
 ### Debug Logging
 

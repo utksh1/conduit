@@ -1,71 +1,46 @@
 import { useEffect, useRef, useState } from "react";
-import { Send, Trash2, AlertCircle, Image as ImageIcon } from "lucide-react";
-import { Card, Input, Select, Button, Label, Spinner } from "@/components/ui";
+import { AlertCircle, Image as ImageIcon, Send, Trash2 } from "lucide-react";
+import { Button, Card, Select, Spinner } from "@/components/ui";
+import ProtectedImage from "@/components/ProtectedImage";
+import { dashboardFetch } from "@/lib/dashboard-fetch";
 
 type Role = "user" | "assistant";
+
 interface Message {
   role: Role;
   content: string;
 }
 
-const PROXY_BASE = "";
-const DEFAULT_MODELS = ["gpt-5-5", "gpt-5-5-instant", "gpt-5-5-thinking", "gpt-5-4-thinking", "gpt-5-3-instant", "gpt-5-2-instant", "gpt-5-2-thinking", "o3"];
-
-function AuthImage({ src, alt }: { src: string; alt?: string }) {
-  const [blobUrl, setBlobUrl] = useState<string | null>(null);
-  
-  useEffect(() => {
-    let active = true;
-    const apiKey = localStorage.getItem("chat_api_key");
-    const headers: Record<string, string> = {};
-    if (apiKey) {
-      headers["Authorization"] = `Bearer ${apiKey}`;
-    }
-    
-    // If it's a relative path to our proxy, prepend proxy base if needed
-    const fetchUrl = src.startsWith("/") ? `${PROXY_BASE}${src}` : src;
-    
-    fetch(fetchUrl, { headers })
-      .then(res => res.ok ? res.blob() : null)
-      .then(blob => {
-         if (active && blob) {
-           setBlobUrl(URL.createObjectURL(blob));
-         }
-      })
-      .catch(console.error);
-      
-    return () => { active = false; };
-  }, [src]);
-
-  if (!blobUrl) {
-    return <div className="p-4 border rounded mt-2 mb-2 bg-[var(--color-surface)] text-sm flex justify-center items-center h-32"><Spinner size={24} /></div>;
-  }
-  return (
-    <img 
-      src={blobUrl} 
-      alt={alt} 
-      className="max-w-full rounded mt-2 mb-2 border border-[var(--color-border)] block"
-    />
-  );
-}
+const DEFAULT_MODELS = [
+  "gpt-5-5",
+  "gpt-5-5-instant",
+  "gpt-5-5-thinking",
+  "gpt-5-4-thinking",
+  "gpt-5-3-instant",
+  "gpt-5-2-instant",
+  "gpt-5-2-thinking",
+  "o3",
+];
 
 function renderContent(content: string) {
   if (!content) return null;
   const parts = content.split(/(!\[.*?\]\(.*?\))/g);
+
   return (
     <>
-      {parts.map((part, i) => {
+      {parts.map((part, index) => {
         const match = part.match(/!\[(.*?)\]\((.*?)\)/);
         if (match) {
           return (
-            <AuthImage 
-              key={i} 
-              src={match[2]} 
-              alt={match[1]} 
+            <ProtectedImage
+              key={index}
+              src={match[2]}
+              alt={match[1]}
+              className="max-w-full rounded mt-2 mb-2 border border-[var(--color-border)] block"
             />
           );
         }
-        return <span key={i}>{part}</span>;
+        return <span key={index}>{part}</span>;
       })}
     </>
   );
@@ -73,7 +48,6 @@ function renderContent(content: string) {
 
 export default function Chat() {
   const [models, setModels] = useState(DEFAULT_MODELS);
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem("chat_api_key") || "");
   const [model, setModel] = useState(DEFAULT_MODELS[0]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -84,28 +58,28 @@ export default function Chat() {
   const scrollerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    localStorage.setItem("chat_api_key", apiKey);
-  }, [apiKey]);
-
-  useEffect(() => {
-    fetch("/v1/models")
-      .then((res) => res.json())
+    dashboardFetch("/v1/models")
+      .then((response) => response.json())
       .then((data) => {
-        if (data && Array.isArray(data.data)) {
-          const fetchedModels = data.data.map((m: any) => m.id);
-          if (fetchedModels.length > 0) {
-            setModels(fetchedModels);
-            if (!fetchedModels.includes(model)) {
-              setModel(fetchedModels[0]);
-            }
-          }
+        if (!data || !Array.isArray(data.data)) return;
+
+        const fetchedModels = data.data
+          .map((item: unknown) => (typeof item === "object" && item && "id" in item ? item.id : null))
+          .filter((item: unknown): item is string => typeof item === "string");
+
+        if (fetchedModels.length > 0) {
+          setModels(fetchedModels);
+          setModel((current) => fetchedModels.includes(current) ? current : fetchedModels[0]);
         }
       })
-      .catch(console.error);
+      .catch(() => undefined);
   }, []);
 
   useEffect(() => {
-    scrollerRef.current?.scrollTo({ top: scrollerRef.current.scrollHeight, behavior: "smooth" });
+    scrollerRef.current?.scrollTo({
+      top: scrollerRef.current.scrollHeight,
+      behavior: "smooth",
+    });
   }, [messages]);
 
   function clear() {
@@ -117,15 +91,17 @@ export default function Chat() {
 
   async function send() {
     let text = input.trim();
-    if (!text || !apiKey.trim() || streaming) return;
+    if (!text || streaming) return;
+
     setError(null);
     setInput("");
-    
-    if (imageMode) {
-      text = `Generate an image of ${text}`;
-    }
-    
-    const next: Message[] = [...messages, { role: "user", content: text }, { role: "assistant", content: "" }];
+    if (imageMode) text = `Generate an image of ${text}`;
+
+    const next: Message[] = [
+      ...messages,
+      { role: "user", content: text },
+      { role: "assistant", content: "" },
+    ];
     setMessages(next);
     setStreaming(true);
 
@@ -133,62 +109,65 @@ export default function Chat() {
     abortRef.current = controller;
 
     try {
-      const res = await fetch(`${PROXY_BASE}/v1/chat/completions`, {
+      const response = await dashboardFetch("/v1/chat/completions", {
         method: "POST",
         signal: controller.signal,
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey.trim()}`,
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model,
           stream: true,
-          messages: next.slice(0, -1).map((m) => ({ role: m.role, content: m.content })),
+          messages: next.slice(0, -1).map((message) => ({
+            role: message.role,
+            content: message.content,
+          })),
         }),
       });
 
-      if (!res.ok || !res.body) {
-        const body = await res.text().catch(() => "");
-        throw new Error(`${res.status} ${res.statusText}${body ? ` — ${body.slice(0, 240)}` : ""}`);
+      if (!response.ok || !response.body) {
+        const body = await response.text().catch(() => "");
+        throw new Error(
+          `${response.status} ${response.statusText}${body ? `: ${body.slice(0, 240)}` : ""}`,
+        );
       }
 
-      const reader = res.body.getReader();
+      const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
-      let acc = "";
+      let accumulated = "";
 
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
+
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
         buffer = lines.pop() ?? "";
+
         for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed.startsWith("data:")) continue;
-          const payload = trimmed.slice(5).trim();
+          const payload = line.trim().startsWith("data:") ? line.trim().slice(5).trim() : "";
           if (!payload || payload === "[DONE]") continue;
+
           try {
-            const json = JSON.parse(payload);
-            const delta = json?.choices?.[0]?.delta?.content;
+            const chunk = JSON.parse(payload);
+            const delta = chunk?.choices?.[0]?.delta?.content;
             if (typeof delta === "string" && delta.length > 0) {
-              acc += delta;
-              setMessages((prev) => {
-                const copy = prev.slice();
-                copy[copy.length - 1] = { role: "assistant", content: acc };
+              accumulated += delta;
+              setMessages((previous) => {
+                const copy = previous.slice();
+                copy[copy.length - 1] = { role: "assistant", content: accumulated };
                 return copy;
               });
             }
           } catch {
-            // ignore non-JSON keepalives
+            // Ignore non-JSON keepalive events.
           }
         }
       }
-    } catch (e) {
-      if ((e as Error).name === "AbortError") return;
-      setError((e as Error).message || "Request failed");
-      setMessages((prev) => {
-        const copy = prev.slice();
+    } catch (requestError) {
+      if ((requestError as Error).name === "AbortError") return;
+      setError((requestError as Error).message || "Request failed");
+      setMessages((previous) => {
+        const copy = previous.slice();
         if (copy.length && copy[copy.length - 1].role === "assistant" && copy[copy.length - 1].content === "") {
           copy.pop();
         }
@@ -200,9 +179,9 @@ export default function Chat() {
     }
   }
 
-  function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
+  function onKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
       send();
     }
   }
@@ -212,30 +191,18 @@ export default function Chat() {
       <div>
         <h1 className="text-2xl font-semibold">Chat</h1>
         <p className="text-sm text-[var(--color-fg-muted)] mt-1">
-          Quick scratchpad against the proxy. Nothing is stored — refresh wipes the conversation.
+          Quick scratchpad against the proxy. Nothing is stored. Refreshing clears the conversation.
         </p>
       </div>
 
       <Card className="p-4">
-        <div className="grid grid-cols-1 md:grid-cols-[1fr_220px] gap-3">
-          <div>
-            <Label>API key</Label>
-            <Input
-              type="password"
-              autoComplete="off"
-              placeholder="sk-cgpt-..."
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-            />
-          </div>
-          <div>
-            <Label>Model</Label>
-            <Select value={model} onChange={(e) => setModel(e.target.value)}>
-              {models.map((m) => (
-                <option key={m} value={m}>{m}</option>
-              ))}
-            </Select>
-          </div>
+        <div>
+          <label className="text-sm font-medium">Model</label>
+          <Select value={model} onChange={(event) => setModel(event.target.value)} className="mt-2">
+            {models.map((item) => (
+              <option key={item} value={item}>{item}</option>
+            ))}
+          </Select>
         </div>
       </Card>
 
@@ -243,19 +210,23 @@ export default function Chat() {
         <div ref={scrollerRef} className="flex-1 overflow-y-auto p-5 space-y-4">
           {messages.length === 0 && (
             <div className="text-sm text-[var(--color-fg-muted)] text-center py-10">
-              Paste an API key above and start chatting.
+              Start a conversation.
             </div>
           )}
-          {messages.map((m, i) => (
-            <div key={i} className={m.role === "user" ? "flex justify-end" : "flex justify-start"}>
+          {messages.map((message, index) => (
+            <div key={index} className={message.role === "user" ? "flex justify-end" : "flex justify-start"}>
               <div
                 className={
-                  m.role === "user"
+                  message.role === "user"
                     ? "max-w-[80%] rounded-lg bg-[var(--color-accent)] text-[var(--color-accent-fg)] px-4 py-2 text-sm whitespace-pre-wrap"
                     : "max-w-[80%] rounded-lg bg-[var(--color-surface-2)] text-[var(--color-fg)] px-4 py-2 text-sm whitespace-pre-wrap"
                 }
               >
-                {m.content ? renderContent(m.content) : (streaming && i === messages.length - 1 ? <Spinner size={14} /> : null)}
+                {message.content
+                  ? renderContent(message.content)
+                  : streaming && index === messages.length - 1
+                    ? <Spinner size={14} />
+                    : null}
               </div>
             </div>
           ))}
@@ -268,31 +239,25 @@ export default function Chat() {
         </div>
 
         <div className="border-t p-3 flex items-end gap-2">
-          <Button 
-            variant={imageMode ? "primary" : "ghost"} 
-            className={`shrink-0 self-end mb-0 ${imageMode ? 'bg-purple-600 hover:bg-purple-700 text-white border-transparent' : ''}`}
+          <Button
+            variant={imageMode ? "primary" : "ghost"}
+            className={`shrink-0 self-end mb-0 ${imageMode ? "bg-purple-600 hover:bg-purple-700 text-white border-transparent" : ""}`}
             onClick={() => setImageMode(!imageMode)}
-            title="Toggle Image Generation Mode"
+            title="Toggle image generation mode"
           >
             <ImageIcon size={18} />
           </Button>
           <textarea
             className="flex-1 resize-none rounded-md border bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)]"
             rows={2}
-            placeholder={
-              !apiKey 
-                ? "Add an API key first" 
-                : imageMode 
-                  ? "Describe the image you want to generate..." 
-                  : "Message... (Enter to send, Shift+Enter for newline)"
-            }
+            placeholder={imageMode ? "Describe the image you want to generate..." : "Message... (Enter to send, Shift+Enter for newline)"}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(event) => setInput(event.target.value)}
             onKeyDown={onKeyDown}
-            disabled={!apiKey || streaming}
+            disabled={streaming}
           />
           <div className="flex flex-col gap-2">
-            <Button onClick={send} disabled={!apiKey || !input.trim() || streaming} size="sm">
+            <Button onClick={send} disabled={!input.trim() || streaming} size="sm">
               {streaming ? <Spinner size={14} /> : <Send size={14} />}
               {streaming ? "Streaming" : "Send"}
             </Button>

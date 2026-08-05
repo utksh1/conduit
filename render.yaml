@@ -12,6 +12,10 @@ services:
         value: 0.0.0.0
       - key: PROXY_API_KEY
         sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
       - key: ALLOWED_DIRECTORIES
         value: /tmp
       - key: ALLOWED_SHELL_COMMANDS

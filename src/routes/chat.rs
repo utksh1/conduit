@@ -1,15 +1,18 @@
 use axum::{
-    extract::State,
-    http::HeaderMap,
+    extract::{Extension, State},
     response::{IntoResponse, Response},
     Json,
 };
 use axum::body::Body;
 use wreq::StatusCode;
-use sha2::{Sha256, Digest};
 use std::sync::Arc;
 use std::collections::HashMap;
-use crate::{AppState, chatgpt::models::ChatCompletionRequest, error::AppError};
+use crate::{
+    middleware::ApiCredential,
+    AppState,
+    chatgpt::models::ChatCompletionRequest,
+    error::AppError,
+};
 use crate::chatgpt::warmup::warmup_if_needed;
 use crate::tools::{ToolParser, inject_tool_prompt};
 use crate::conversation::hash::{CleanMessage, hash_messages};
@@ -233,41 +236,12 @@ fn to_clean_messages(messages: &[Value]) -> Vec<CleanMessage> {
 
 pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    Extension(credential): Extension<ApiCredential>,
     Json(mut req): Json<ChatCompletionRequest>,
 ) -> Result<Response, AppError> {
-    
     let start_time = std::time::Instant::now();
-    let token = headers.get("authorization")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .ok_or_else(|| AppError::Auth("Missing or invalid Authorization header".to_string()))?;
-        
-    let mut hasher = Sha256::new();
-    hasher.update(token.as_bytes());
-    let token_hash = hex::encode(hasher.finalize());
-    
     let db = &state.db;
-    let auth_res: Result<(String, bool), _> = db.call(move |conn| {
-        conn.query_row(
-            "SELECT id, is_active FROM api_keys WHERE secret_hash = ?",
-            [&token_hash],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
-        )
-    }).await;
-    
-    let key_id = match auth_res {
-        Ok((id, is_active)) if is_active => {
-            // Update last_used_at
-            let id_clone = id.clone();
-            let now = chrono::Utc::now().to_rfc3339();
-            let _ = db.call(move |conn| {
-                conn.execute("UPDATE api_keys SET last_used_at = ? WHERE id = ?", [&now, &id_clone])
-            }).await;
-            id
-        },
-        _ => return Err(AppError::Auth("Invalid or inactive API key".to_string())),
-    };
+    let key_id = credential.database_key_id().map(str::to_owned);
     
     // 1. Check if request has tools
     let has_tools = req.tools.as_ref().map(|t| !t.is_empty()).unwrap_or(false);
@@ -560,7 +534,7 @@ mod tests {
         let result = parse_message_parts(&parts);
         
         assert!(result.contains("Here is the image:"));
-        assert!(result.contains("![image](https://chatgpt.com/backend-api/files/file-123456789/download)"));
+        assert!(result.contains("![image](/v1/files/file-123456789)"));
         assert!(result.contains("![image](https://example.com/image.png)"));
     }
 }

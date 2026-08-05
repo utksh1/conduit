@@ -1,7 +1,7 @@
 use conduit::*;
 
 use axum::{
-    routing::{get, post, patch, delete},
+    routing::{get, patch, post},
     Router, middleware,
 };
 use chatgpt::warmup::WarmupCache;
@@ -11,7 +11,6 @@ use wreq_util::Emulation;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tower_http::{
-    cors::{Any, CorsLayer},
     services::{ServeDir, ServeFile},
     trace::TraceLayer,
 };
@@ -211,11 +210,6 @@ async fn main() {
         db,
     });
 
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
-
     let protected_routes = Router::new()
         .route("/keys", get(routes::keys::list_keys).post(routes::keys::create_key))
         .route("/keys/{id}", patch(routes::keys::update_key).delete(routes::keys::delete_key))
@@ -223,23 +217,31 @@ async fn main() {
         .route("/logs", get(routes::telemetry::get_logs))
         .route("/metrics", get(routes::telemetry::get_metrics))
         .route("/audit", get(routes::telemetry::get_audit))
-        .layer(middleware::from_fn(conduit::middleware::require_auth));
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            conduit::middleware::require_admin_auth,
+        ));
 
     let admin_routes = Router::new()
         .route("/auth/status", get(routes::auth::status))
-        .route("/auth/setup", post(routes::auth::setup))
         .route("/auth/login", post(routes::auth::login))
         .merge(protected_routes);
 
+    let v1_routes = Router::new()
+        .route("/models", get(routes::models::list_models))
+        .route("/chat/completions", post(routes::chat::chat_completions))
+        .route("/images/generations", post(routes::images::generate_image))
+        .route("/files/{*file_id}", get(routes::files::get_file))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            conduit::middleware::require_api_credential,
+        ));
+
     // Build API routes
     let mut app = Router::new()
-        .route("/v1/models", get(routes::models::list_models))
-        .route("/v1/chat/completions", post(routes::chat::chat_completions))
-        .route("/v1/images/generations", post(routes::images::generate_image))
-        .route("/v1/files/{*file_id}", get(routes::files::get_file))
+        .nest("/v1", v1_routes)
         .route("/health", get(health_check))
         .nest("/api", admin_routes)
-        .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state.clone());
 

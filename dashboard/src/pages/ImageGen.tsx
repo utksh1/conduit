@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { Image as ImageIcon, Wand2 } from "lucide-react";
 import { Button, Input, Spinner } from "@/components/ui";
+import ProtectedImage from "@/components/ProtectedImage";
+import { dashboardFetch } from "@/lib/dashboard-fetch";
 
 export default function ImageGen() {
   const [prompt, setPrompt] = useState("");
@@ -11,7 +13,7 @@ export default function ImageGen() {
     if (!prompt.trim()) return;
     setLoading(true);
     try {
-      const response = await fetch("/v1/images/generations", {
+      const response = await dashboardFetch("/v1/images/generations", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt, n: 1, size: "1024x1024" }),
@@ -55,7 +57,7 @@ export default function ImageGen() {
 
       {imageUrl && (
         <div className="bg-[var(--color-surface)] rounded-lg border p-6">
-          <img src={imageUrl} alt="Generated" className="w-full rounded-lg" />
+          <ProtectedImage src={imageUrl} alt="Generated" className="w-full rounded-lg" />
         </div>
       )}
     </div>

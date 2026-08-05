@@ -230,7 +230,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_token_expiry() {
-        let manager = AuthManager::new("test_session".to_string(), Client::new(), None);
+        let manager = AuthManager::new("test_session".to_string(), None, None, Client::new(), None);
         
         let past = Instant::now() - Duration::from_secs(60);
         assert!(manager.is_token_expired(past));
@@ -238,8 +238,8 @@ mod tests {
         let future = Instant::now() + Duration::from_secs(3600);
         assert!(!manager.is_token_expired(future));
 
-        // Buffer test: expires in 4 mins (240 secs) < 300 secs buffer
-        let soon = Instant::now() + Duration::from_secs(240);
+        // Buffer test: expires in 30 secs < 60 secs buffer
+        let soon = Instant::now() + Duration::from_secs(30);
         assert!(manager.is_token_expired(soon));
     }
 }

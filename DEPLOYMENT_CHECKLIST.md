@@ -6,7 +6,7 @@
 - [x] Heuristic tool parser implemented
 - [x] All features verified locally
 - [x] Deployment guide created
-- [ ] Set a separate application `PROXY_API_KEY` in Render
+- [ ] Set `PROXY_API_KEY`, `JWT_SECRET`, and `ADMIN_PASSWORD` as Render secrets
 
 ## 🚀 Deploy to Render
 
@@ -41,7 +41,9 @@ Click "Advanced" → "Add Environment Variable":
 CHATGPT_SESSION_TOKEN=<copy-from-.env>
 CHATGPT_ACCESS_TOKEN=<copy-from-.env>
 CHATGPT_REFRESH_TOKEN=<copy-from-.env>
-PROXY_API_KEY=<your-application-api-key>
+PROXY_API_KEY=<32-character-or-longer-application-secret>
+JWT_SECRET=<32-character-or-longer-jwt-secret>
+ADMIN_PASSWORD=<strong-dashboard-password>
 PORT=3040
 HOST=0.0.0.0
 ALLOWED_DIRECTORIES=/tmp
@@ -75,4 +77,4 @@ Save this URL and use it with:
 - Custom scripts
 - Any OpenAI-compatible client
 
-**Application API Key**: set `PROXY_API_KEY` in Render if you need file-route authorization.
+**Application API Key**: `PROXY_API_KEY` protects every `/v1/*` route. Keep it server-side in Vercel and never reuse the Render account API key.
