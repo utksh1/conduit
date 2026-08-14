@@ -1,5 +1,5 @@
 # ---- Stage 1: Build ----
-FROM rust:1.83-slim-bookworm AS builder
+FROM rust:slim-bookworm AS builder
 
 WORKDIR /app
 
@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y \
 # Copy manifests first for dependency caching
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo 'fn main() {}' > src/main.rs
-RUN rm -rf $CARGO_HOME/registry && cargo build --release && rm -rf src
+RUN cargo build --release && rm -rf src
 
 # Copy actual source and build
 COPY src/ src/
