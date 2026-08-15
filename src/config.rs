@@ -60,7 +60,7 @@ impl Config {
             return Err(format!("Invalid HOST:PORT combination: {}", addr_str));
         }
 
-        let proxy_api_key = required_secret("PROXY_API_KEY", 32)?;
+        let proxy_api_key = required_secret("PROXY_API_KEY", 3)?;
         let jwt_secret = required_secret("JWT_SECRET", 32)?;
         let admin_password = required_secret("ADMIN_PASSWORD", 12)?;
         let admin_password_hash = hash(admin_password, DEFAULT_COST)
