@@ -32,3 +32,6 @@ release_package/
 test_*.py
 tmp_token.txt
 hf_venv/
+.secrets*
+configure-render.sh
+
