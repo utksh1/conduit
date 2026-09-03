@@ -43,10 +43,17 @@ impl Config {
         dotenv::dotenv().ok();
 
         let session_token = env::var("CHATGPT_SESSION_TOKEN")
+            .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
             .map_err(|_| "CHATGPT_SESSION_TOKEN must be set in the environment")?;
 
-        let access_token = env::var("CHATGPT_ACCESS_TOKEN").ok().filter(|s| !s.is_empty());
-        let refresh_token = env::var("CHATGPT_REFRESH_TOKEN").ok().filter(|s| !s.is_empty());
+        let access_token = env::var("CHATGPT_ACCESS_TOKEN")
+            .ok()
+            .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+            .filter(|s| !s.is_empty());
+        let refresh_token = env::var("CHATGPT_REFRESH_TOKEN")
+            .ok()
+            .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+            .filter(|s| !s.is_empty());
 
         let port_str = env::var("PORT").unwrap_or_else(|_| "3000".to_string());
         let port: u16 = port_str

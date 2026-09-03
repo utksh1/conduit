@@ -61,12 +61,15 @@ pub async fn get_chat_requirements(
         req_body["p"] = json!(p_token);
     }
     
+    let device_id = crate::chatgpt::headers::generate_device_id(session_token);
+    let headers = crate::chatgpt::headers::build_chatgpt_headers(&device_id, None, true);
+
     let response = client
         .post(&url)
+        .headers(headers)
         .header("Authorization", format!("Bearer {}", access_token))
         .header("Cookie", cookie_header)
         .header("Content-Type", "application/json")
-        .header("User-Agent", user_agent)
         .json(&req_body)
         .send()
         .await
