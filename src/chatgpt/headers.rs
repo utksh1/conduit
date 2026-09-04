@@ -6,7 +6,7 @@ use uuid::Uuid;
 const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0";
 
 /// OpenAI client version
-const OAI_CLIENT_VERSION: &str = "prod-81e0c5cdf6140e8c5db714d613337f4aeab94029";
+const OAI_CLIENT_VERSION: &str = "prod-cc1986947d7d14a47b20a24b482c24646fadec8f";
 
 /// OpenAI client build number
 const OAI_CLIENT_BUILD_NUMBER: &str = "6128297";
@@ -30,13 +30,23 @@ pub fn generate_session_id() -> String {
 /// Build browser-like headers for ChatGPT API requests
 /// 
 /// # Arguments
-/// * `session_token` - The session token for device ID generation
+/// * `device_id` - The device ID for request tracking
 /// * `session_id` - Optional session ID for this conversation (generates new if None)
 /// * `include_oai_headers` - Whether to include OpenAI-specific headers
 pub fn build_chatgpt_headers(
     device_id: &str,
     session_id: Option<String>,
     include_oai_headers: bool,
+) -> HeaderMap {
+    build_chatgpt_headers_with_version(device_id, session_id, include_oai_headers, None)
+}
+
+/// Build browser-like headers for ChatGPT API requests with custom client version
+pub fn build_chatgpt_headers_with_version(
+    device_id: &str,
+    session_id: Option<String>,
+    include_oai_headers: bool,
+    client_version: Option<&str>,
 ) -> HeaderMap {
     let mut headers = HeaderMap::new();
 
@@ -84,9 +94,10 @@ pub fn build_chatgpt_headers(
         );
 
         // Client version and build
+        let version_str = client_version.unwrap_or(OAI_CLIENT_VERSION);
         headers.insert(
             HeaderName::from_static("oai-client-version"),
-            HeaderValue::from_static(OAI_CLIENT_VERSION),
+            HeaderValue::from_str(version_str).unwrap_or_else(|_| HeaderValue::from_static(OAI_CLIENT_VERSION)),
         );
         headers.insert(
             HeaderName::from_static("oai-client-build-number"),

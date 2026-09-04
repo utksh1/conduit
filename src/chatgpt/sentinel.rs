@@ -27,9 +27,18 @@ pub async fn get_chat_requirements(
 ) -> Result<SentinelRequirements, AppError> {
     let base = base_url.trim_end_matches("/backend-api/conversation");
     let url = format!("{}/backend-api/sentinel/chat-requirements", base);
+    let dpl_info = super::dpl::get_dpl_info(client).await;
+
+    let device_id = crate::chatgpt::headers::generate_device_id(session_token);
+    let headers = crate::chatgpt::headers::build_chatgpt_headers_with_version(
+        &device_id,
+        None,
+        true,
+        Some(&dpl_info.dpl),
+    );
     
     // Step 1: Solve prepare PoW if requested
-    let prepare_token = if with_prepare {
+    let mut prepare_token = if with_prepare {
         info!("Solving Sentinel prepare PoW...");
         match solve_pow_with_config(
             "",              // Empty seed for prepare
@@ -52,33 +61,57 @@ pub async fn get_chat_requirements(
         None
     };
     
-    // Step 2: Request chat requirements
-    let mut req_body = json!({
-        "conversation_mode_kind": "primary_assistant"
-    });
-    
-    if let Some(p_token) = prepare_token {
-        req_body["p"] = json!(p_token);
-    }
-    
-    let device_id = crate::chatgpt::headers::generate_device_id(session_token);
-    let headers = crate::chatgpt::headers::build_chatgpt_headers(&device_id, None, true);
+    // Step 2: Helper to send chat requirements request
+    let send_requirements_request = |p_token: Option<&str>| {
+        let mut req_body = json!({
+            "conversation_mode_kind": "primary_assistant"
+        });
+        if let Some(p) = p_token {
+            req_body["p"] = json!(p);
+        }
+        client
+            .post(&url)
+            .headers(headers.clone())
+            .header("Authorization", format!("Bearer {}", access_token))
+            .header("Cookie", cookie_header)
+            .header("Content-Type", "application/json")
+            .json(&req_body)
+    };
 
-    let response = client
-        .post(&url)
-        .headers(headers)
-        .header("Authorization", format!("Bearer {}", access_token))
-        .header("Cookie", cookie_header)
-        .header("Content-Type", "application/json")
-        .json(&req_body)
+    let mut response = send_requirements_request(prepare_token.as_deref())
         .send()
         .await
         .map_err(|e| AppError::Internal(format!("Sentinel requirements request failed: {}", e)))?;
+
+    // If initial attempt without prepare failed (common on datacenter IPs with 403), solve prepare PoW and retry
+    if !response.status().is_success() && prepare_token.is_none() {
+        warn!(
+            "Sentinel requirements returned status {}, solving prepare PoW and retrying...",
+            response.status()
+        );
+        if let Some(p) = solve_pow_with_config(
+            "",
+            "0fffff",
+            PREPARE_PREFIX,
+            user_agent,
+            client,
+            100_000,
+        ).await {
+            prepare_token = Some(p.clone());
+            response = send_requirements_request(Some(&p))
+                .send()
+                .await
+                .map_err(|e| AppError::Internal(format!("Sentinel requirements retry failed: {}", e)))?;
+        }
+    }
     
     if !response.status().is_success() {
+        let status = response.status();
+        let body_text = response.text().await.unwrap_or_default();
+        warn!("Sentinel requirements failed with status {}: {}", status, body_text);
         return Err(AppError::Upstream(format!(
             "Sentinel requirements returned status {}",
-            response.status()
+            status
         )));
     }
     

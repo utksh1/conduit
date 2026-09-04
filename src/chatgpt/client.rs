@@ -75,9 +75,15 @@ impl ChatGPTClient {
                 }
             }
 
-            // Build browser-like headers with OAI-specific headers
+            // Build browser-like headers with OAI-specific headers and current DPL version
+            let dpl_info = super::dpl::get_dpl_info(&self.client).await;
             let device_id = self.auth_manager.get_device_id();
-            let headers = build_chatgpt_headers(&device_id, None, true);
+            let headers = super::headers::build_chatgpt_headers_with_version(
+                &device_id,
+                None,
+                true,
+                Some(&dpl_info.dpl),
+            );
 
             let mut req_builder = self
                 .client
