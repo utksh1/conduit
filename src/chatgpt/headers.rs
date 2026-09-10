@@ -2,8 +2,8 @@ use wreq::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, ACCEPT_ENCODING, 
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-/// Firefox 152 User-Agent string matching OmniRoute
-const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0";
+/// Chrome 120 User-Agent matching wreq Chrome120 TLS emulation
+const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 /// OpenAI client version
 const OAI_CLIENT_VERSION: &str = "prod-c4ad2074065cc40142f2fa2e09294009480c7d3f";
@@ -11,15 +11,15 @@ const OAI_CLIENT_VERSION: &str = "prod-c4ad2074065cc40142f2fa2e09294009480c7d3f"
 /// OpenAI client build number
 const OAI_CLIENT_BUILD_NUMBER: &str = "6128297";
 
-/// Generate a stable device ID from the session token
+/// Generate a stable device ID from the session token (UUID format)
 /// Uses SHA-256 hash to ensure same token always produces same device ID
 pub fn generate_device_id(session_token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(session_token.as_bytes());
     let hash = hasher.finalize();
-    // Convert to hex and take first 32 chars for device ID
-    let hex_str = hex::encode(hash);
-    hex_str[..32].to_string()
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&hash[..16]);
+    Uuid::from_bytes(bytes).to_string()
 }
 
 /// Generate a random session ID for a conversation
@@ -50,7 +50,7 @@ pub fn build_chatgpt_headers_with_version(
 ) -> HeaderMap {
     let mut headers = HeaderMap::new();
 
-    // Standard browser headers
+    // Standard browser headers matching Chrome 120
     headers.insert(USER_AGENT, HeaderValue::from_static(BROWSER_USER_AGENT));
     headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
     headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.9"));
@@ -65,6 +65,20 @@ pub fn build_chatgpt_headers_with_version(
     );
     
     headers.insert(REFERER, HeaderValue::from_static("https://chatgpt.com/"));
+
+    // Chrome Client Hints
+    headers.insert(
+        HeaderName::from_static("sec-ch-ua"),
+        HeaderValue::from_static("\"Not_A Brand\";v=\"8\", \"Chromium\";v=\"120\", \"Google Chrome\";v=\"120\""),
+    );
+    headers.insert(
+        HeaderName::from_static("sec-ch-ua-mobile"),
+        HeaderValue::from_static("?0"),
+    );
+    headers.insert(
+        HeaderName::from_static("sec-ch-ua-platform"),
+        HeaderValue::from_static("\"macOS\""),
+    );
 
     // Fetch metadata headers (security)
     headers.insert(
@@ -131,6 +145,20 @@ pub fn build_auth_headers() -> HeaderMap {
     headers.insert(ORIGIN, HeaderValue::from_static("https://chatgpt.com"));
     headers.insert(REFERER, HeaderValue::from_static("https://chatgpt.com/"));
 
+    // Chrome Client Hints
+    headers.insert(
+        HeaderName::from_static("sec-ch-ua"),
+        HeaderValue::from_static("\"Not_A Brand\";v=\"8\", \"Chromium\";v=\"120\", \"Google Chrome\";v=\"120\""),
+    );
+    headers.insert(
+        HeaderName::from_static("sec-ch-ua-mobile"),
+        HeaderValue::from_static("?0"),
+    );
+    headers.insert(
+        HeaderName::from_static("sec-ch-ua-platform"),
+        HeaderValue::from_static("\"macOS\""),
+    );
+
     headers.insert(
         HeaderName::from_static("sec-fetch-dest"),
         HeaderValue::from_static("empty"),
@@ -169,7 +197,7 @@ mod tests {
     #[test]
     fn test_device_id_length() {
         let id = generate_device_id("test_token");
-        assert_eq!(id.len(), 32, "Device ID should be 32 characters");
+        assert_eq!(id.len(), 36, "Device ID should be 36 characters");
     }
 
     #[test]
