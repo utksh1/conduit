@@ -56,8 +56,8 @@ pub fn build_prekey_config(user_agent: &str, dpl: &str, script_src: &str) -> Vec
         // [0] Screen size (width)
         Value::Number(pick(SCREEN_SIZES).into()),
         
-        // [1] Current datetime string
-        Value::String(chrono::Local::now().to_string()),
+        // [1] Current datetime string matching JS Date.prototype.toString()
+        Value::String(chrono::Utc::now().format("%a %b %d %Y %H:%M:%S GMT+0000 (Coordinated Universal Time)").to_string()),
         
         // [2] Magic constant
         Value::Number(4294705152u64.into()),

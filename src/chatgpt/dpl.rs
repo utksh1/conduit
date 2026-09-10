@@ -19,7 +19,7 @@ lazy_static! {
 }
 
 /// Default fallback values if scraping fails
-const DEFAULT_DPL: &str = "prod-cc1986947d7d14a47b20a24b482c24646fadec8f";
+const DEFAULT_DPL: &str = "prod-c4ad2074065cc40142f2fa2e09294009480c7d3f";
 const DEFAULT_SCRIPT_SRC: &str = "https://cdn.oaistatic.com/_next/static/chunks/7112-e6b809c1f4c9559f.js";
 
 /// Cache TTL in seconds (60 minutes)

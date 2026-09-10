@@ -6,7 +6,7 @@ use uuid::Uuid;
 const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0";
 
 /// OpenAI client version
-const OAI_CLIENT_VERSION: &str = "prod-cc1986947d7d14a47b20a24b482c24646fadec8f";
+const OAI_CLIENT_VERSION: &str = "prod-c4ad2074065cc40142f2fa2e09294009480c7d3f";
 
 /// OpenAI client build number
 const OAI_CLIENT_BUILD_NUMBER: &str = "6128297";

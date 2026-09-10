@@ -63,11 +63,12 @@ impl ChatGPTClient {
                 Ok(res) => res,
                 Err(AppError::Upstream(ref msg)) if msg.contains("401") || msg.contains("403") => {
                     if attempts < max_attempts {
-                        warn!("Sentinel requirements returned 401/403, forcing token refresh...");
-                        let _ = self.auth_manager.refresh_token().await?;
-                        continue;
+                        warn!("Sentinel requirements returned 401/403, attempting token refresh...");
+                        if let Ok(_) = self.auth_manager.refresh_token().await {
+                            continue;
+                        }
                     }
-                    return Err(AppError::Auth("ChatGPT session or access token is invalid or revoked. Please update CHATGPT_SESSION_TOKEN or CHATGPT_ACCESS_TOKEN.".to_string()));
+                    return Err(AppError::Upstream(format!("Sentinel requirements failed ({}). Please check session/access tokens.", msg)));
                 }
                 Err(e) => return Err(e),
             };
