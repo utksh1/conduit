@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 /// Chrome 120 User-Agent matching wreq Chrome120 TLS emulation
-const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+pub const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 /// OpenAI client version
 const OAI_CLIENT_VERSION: &str = "prod-c4ad2074065cc40142f2fa2e09294009480c7d3f";

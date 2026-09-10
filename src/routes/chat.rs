@@ -341,8 +341,7 @@ pub async fn chat_completions(
 
     let mut status_code = 200;
     let mut final_error: Option<String> = None;
-    
-    let mut response_result = Ok((StatusCode::OK, Json(json!({}))).into_response());
+    let mut response_result: Result<Response, AppError>;
 
     loop {
         iterations += 1;

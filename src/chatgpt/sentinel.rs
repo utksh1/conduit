@@ -97,7 +97,6 @@ pub async fn get_chat_requirements(
             client,
             100_000,
         ).await {
-            prepare_token = Some(p.clone());
             response = send_requirements_request(Some(&p))
                 .send()
                 .await

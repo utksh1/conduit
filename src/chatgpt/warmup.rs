@@ -103,7 +103,7 @@ fn generate_warmup_key(session_token: &str, access_token: &str) -> String {
 pub async fn run_warmup(
     client: &Client,
     access_token: &str,
-    session_token: &str,
+    _session_token: &str,
     cookie_header: &str,
     base_url: &str,
 ) -> Result<(), String> {

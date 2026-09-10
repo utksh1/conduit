@@ -6,8 +6,7 @@ use crate::auth::AuthManager;
 use crate::error::AppError;
 use wreq::{Client, Response};
 use uuid::Uuid;
-use tracing::{info, warn};
-use serde_json::Value;
+use tracing::warn;
 
 #[derive(Clone)]
 pub struct ChatGPTClient {
@@ -49,7 +48,7 @@ impl ChatGPTClient {
             // Fetch Sentinel requirements first
             let session_token = self.auth_manager.get_session_token();
             let cookie_header = self.auth_manager.get_cookie_header();
-            let user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0";
+            let user_agent = super::headers::BROWSER_USER_AGENT;
             
             let req_res = match get_chat_requirements(
                 &self.client,
