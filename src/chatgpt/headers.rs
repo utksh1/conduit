@@ -120,11 +120,29 @@ pub fn build_auth_headers() -> HeaderMap {
     let mut headers = HeaderMap::new();
     
     headers.insert(USER_AGENT, HeaderValue::from_static(BROWSER_USER_AGENT));
-    headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
+    headers.insert(ACCEPT, HeaderValue::from_static("application/json, text/plain, */*"));
     headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.9"));
     headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip, deflate, br"));
+    headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    headers.insert(
+        HeaderName::from_static("pragma"),
+        HeaderValue::from_static("no-cache"),
+    );
     headers.insert(ORIGIN, HeaderValue::from_static("https://chatgpt.com"));
     headers.insert(REFERER, HeaderValue::from_static("https://chatgpt.com/"));
+
+    headers.insert(
+        HeaderName::from_static("sec-fetch-dest"),
+        HeaderValue::from_static("empty"),
+    );
+    headers.insert(
+        HeaderName::from_static("sec-fetch-mode"),
+        HeaderValue::from_static("cors"),
+    );
+    headers.insert(
+        HeaderName::from_static("sec-fetch-site"),
+        HeaderValue::from_static("same-origin"),
+    );
 
     headers
 }

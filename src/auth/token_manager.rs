@@ -10,11 +10,10 @@ use super::cookie::{parse_session_cookie, ParsedCookie};
 #[derive(Clone)]
 pub struct AuthManager {
     token: Arc<RwLock<Option<(String, Instant)>>>,
-    static_access_token: Option<String>,
     refresh_token: Option<String>,
     parsed_cookie: ParsedCookie,
     client: Client,
-    pub base_url: String,
+    base_url: String,
 }
 
 impl AuthManager {
@@ -30,9 +29,12 @@ impl AuthManager {
             parsed_cookie.session_token.len(), 
             parsed_cookie.full_cookie_header.len());
         
+        let initial_token = access_token.map(|t| {
+            (t, Instant::now() + Duration::from_secs(3600))
+        });
+        
         Self {
-            token: Arc::new(RwLock::new(None)),
-            static_access_token: access_token,
+            token: Arc::new(RwLock::new(initial_token)),
             refresh_token,
             parsed_cookie,
             client,
@@ -60,10 +62,6 @@ impl AuthManager {
     }
 
     pub async fn get_token(&self) -> Result<String, AppError> {
-        if let Some(token) = &self.static_access_token {
-            return Ok(token.clone());
-        }
-
         {
             let cache = self.token.read().await;
             if let Some((token, expiry)) = &*cache {

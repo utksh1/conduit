@@ -51,7 +51,7 @@ impl ChatGPTClient {
             let cookie_header = self.auth_manager.get_cookie_header();
             let user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0";
             
-            let req_res = get_chat_requirements(
+            let req_res = match get_chat_requirements(
                 &self.client,
                 &token,
                 session_token,
@@ -59,7 +59,18 @@ impl ChatGPTClient {
                 user_agent,
                 &self.base_url,
                 false,
-            ).await?;
+            ).await {
+                Ok(res) => res,
+                Err(AppError::Upstream(ref msg)) if msg.contains("401") || msg.contains("403") => {
+                    if attempts < max_attempts {
+                        warn!("Sentinel requirements returned 401/403, forcing token refresh...");
+                        let _ = self.auth_manager.refresh_token().await?;
+                        continue;
+                    }
+                    return Err(AppError::Auth("ChatGPT session or access token is invalid or revoked. Please update CHATGPT_SESSION_TOKEN or CHATGPT_ACCESS_TOKEN.".to_string()));
+                }
+                Err(e) => return Err(e),
+            };
 
             let mut pow_token = None;
             if req_res.proof_required {
